@@ -12,9 +12,10 @@ from kraft import init
 class _Recorder:
     """Stands in for subprocess.run so no test shells out to a real `claude`."""
 
-    def __init__(self, returncode=0):
+    def __init__(self, returncode=0, stderr=None):
         self.calls = []
         self.returncode = returncode
+        self.stderr = stderr
 
     def __call__(self, cmd, **kwargs):
         self.calls.append(cmd)
@@ -25,7 +26,10 @@ class _Recorder:
         result = Result()
         result.returncode = self.returncode
         result.stdout = ""
-        result.stderr = "" if self.returncode == 0 else "claude: no such command"
+        if self.stderr is not None:
+            result.stderr = self.stderr
+        else:
+            result.stderr = "" if self.returncode == 0 else "claude: no such command"
         return result
 
 
@@ -125,16 +129,32 @@ def test_user_scope_delegates_registration_to_the_claude_cli(tmp_path, monkeypat
     assert not (tmp_path / ".claude.json").exists()
 
 
-def test_user_scope_installs_the_same_plugin(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "run",
+    [_Recorder(), _Recorder(returncode=1, stderr="MCP server kraft already exists in user config")],
+    ids=["new-registration", "already-registered"],
+)
+def test_user_scope_installs_the_same_plugin(tmp_path, monkeypatch, capsys, run):
     """Verified against the CLI: .claude/skills/<name>/ with a manifest loads as
     <name>@skills-dir in user and project scope alike."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    init.install(repo_scope=False, cwd=tmp_path, run=_Recorder())
-
     root = _plugin_root(tmp_path / ".claude")
+    stale = root / "skills" / "board" / "SKILL.md"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("outdated skill\n")
+    written = init.install(repo_scope=False, cwd=tmp_path, run=run)
+
     assert (root / ".claude-plugin" / "plugin.json").is_file()
     for skill in SKILL_NAMES:
-        assert (root / "skills" / skill / "SKILL.md").is_file()
+        path = root / "skills" / skill / "SKILL.md"
+        assert path.is_file()
+        assert str(path) in written
+        assert f"name: {skill}\n" in path.read_text()
+    output = capsys.readouterr().out
+    if run.returncode:
+        assert "MCP server already registered" in output
+    else:
+        assert not output
 
 
 def _no_claude_on_path(cmd, **kwargs):
@@ -142,7 +162,9 @@ def _no_claude_on_path(cmd, **kwargs):
 
 
 @pytest.mark.parametrize(
-    "run", [_Recorder(returncode=1), _no_claude_on_path], ids=["claude-refused", "no-claude"]
+    "run",
+    [_Recorder(returncode=1), _Recorder(returncode=1, stderr=""), _no_claude_on_path],
+    ids=["claude-refused", "empty-stderr", "no-claude"],
 )
 def test_a_missing_claude_cli_reports_the_command_instead_of_guessing(tmp_path, monkeypatch, run):
     monkeypatch.setenv("HOME", str(tmp_path))

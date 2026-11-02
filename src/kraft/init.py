@@ -124,7 +124,9 @@ def install(
         result = run(command, capture_output=True, text=True)
     except FileNotFoundError:
         result = None
-    if result is None or result.returncode != 0:
+    if result is not None and result.returncode != 0 and "already exists" in result.stderr:
+        print("kraft: MCP server already registered; refreshing skills.")
+    elif result is None or result.returncode != 0:
         # A missing agent CLI is a thing to report, not to work around by
         # rewriting user state we do not own.
         raise SystemExit(

@@ -130,7 +130,7 @@ These verbs do not print the payload:
 | `admin install-service`, `uninstall-service` | None. |
 | `admin mcp`, `admin permission-hook` | None; these speak a protocol on stdio. |
 | `admin addon enable`, `disable` | `kraft admin addon list --json` (these print one line). |
-| `admin init` | None. It accepts `--json` and ignores it; it prints one `kraft: wrote PATH` line per file. |
+| `admin init` | None. It accepts `--json` and ignores it; it reports an existing MCP registration before printing one `kraft: wrote PATH` line per file. |
 
 ### Without `--json`
 
