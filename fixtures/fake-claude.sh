@@ -6,6 +6,8 @@
 # default `fix` mode edits calc.py only once, so a second fix round edits
 # nothing and a `just dev` fix loop stops after its first round: that is the
 # product's behaviour (a round that changed nothing stops), not a fake bug.
+# Slow sleeps KRAFT_FAKE_CLAUDE_DELAY first in every task, or only in the tasks of the node named
+# by KRAFT_FAKE_CLAUDE_SLOW_NODE.
 # The reported status defaults to "done"; KRAFT_FAKE_CLAUDE_STATUS overrides it,
 # and KRAFT_FAKE_CLAUDE_CONCERNS / KRAFT_FAKE_CLAUDE_QUESTION set the field that
 # goes with done_with_concerns / needs_context.
@@ -125,6 +127,19 @@ many_files=""
 case "$*" in *KRAFT_MANY_FILES*) many_files=1 ;; esac
 
 if [ -z "$init_printed" ]; then print_init; fi
+
+# KRAFT_FAKE_CLAUDE_SLOW_NODE=<node id>: only that node's tasks are slow, so a test that holds an
+# item at a later node does not also wait out the delay of every node before it.
+if [ "$mode" = "slow" ] && [ -n "${KRAFT_FAKE_CLAUDE_SLOW_NODE:-}" ]; then
+  node=""
+  for arg in "$@"; do
+    case "$arg" in
+      "Node: "* | *$'\n'"Node: "*) node="$(printf '%s\n' "$arg" | sed -n 's/^Node: //p' | head -1)"; break ;;
+    esac
+  done
+  # No "Node:" line: slow, as without the knob, rather than quietly not slow.
+  [ -z "$node" ] || [ "$node" = "$KRAFT_FAKE_CLAUDE_SLOW_NODE" ] || mode="fix"
+fi
 
 if [ "$mode" = "slow" ]; then
   sleep "${KRAFT_FAKE_CLAUDE_DELAY:-10}"

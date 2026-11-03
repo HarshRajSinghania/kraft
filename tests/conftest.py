@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import shutil
-import socket
 import sys
 import tempfile
 import threading
@@ -14,11 +13,10 @@ import httpx
 import pytest
 from rich.logging import RichHandler
 from support import api as api_support
-from support import harness, real_binaries
+from support import harness, real_binaries, server
 from support.fake_beads import Bd, FakeBeads
 from support.harness import REAL_AGENT_BINARIES as _REAL_AGENT_BINARIES
 from support.harness import entry_of, fake_templates_dir, isolated_bd, make_repo
-from support.real_binaries import GUARDED_BINARIES as _GUARDED_BINARIES
 
 from kraft import client as kraft_client
 from kraft import db
@@ -114,7 +112,7 @@ def _no_real_agent_binary(request, monkeypatch):
     if "real_executor" in request.keywords:
         yield None
         return
-    allowed = _GUARDED_BINARIES & _e2e_binaries(request.node)
+    allowed = real_binaries.allowed_by(_e2e_binaries(request.node))
     guard = real_binaries.install(monkeypatch, request.node.nodeid, allowed)
     refused = _REAL_AGENT_BINARIES - allowed
 
@@ -432,7 +430,7 @@ _SUITE_SWITCHES = frozenset({"KRAFT_E2E", "KRAFT_E2E_REQUIRE", "KRAFT_TEST_REAL_
 
 
 @pytest.fixture(autouse=True)
-def _isolated_kraft_home(tmp_path, tmp_path_factory, monkeypatch):
+def _isolated_kraft_home(request, tmp_path, tmp_path_factory, monkeypatch):
     """No test may reach the operator's real `~/.kraft`.
 
     `kraft_home()` falls back to `~/.kraft` (paths.py:16). Only KRAFT_RUN_DIR and
@@ -457,10 +455,10 @@ def _isolated_kraft_home(tmp_path, tmp_path_factory, monkeypatch):
     # doesn't opt into the `app` fixture's ASGI transport falls through to a
     # real HTTP call in `client.base_url()`, and a developer machine running
     # `kraft` for real answers it — turning an expected ConnectError into a
-    # live 401. Pin an ephemeral port nothing is listening on yet instead.
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        monkeypatch.setenv("KRAFT_PORT", str(probe.getsockname()[1]))
+    # live 401. Pin one nothing listens on, held until the test ends (`server.hold_port`).
+    probe = server.hold_port()
+    request.addfinalizer(probe.close)
+    monkeypatch.setenv("KRAFT_PORT", str(probe.getsockname()[1]))
     # No test may reach the release feed either. `doctor`'s version check and the
     # notice at boot both call out to gitlab.com, which would make this suite
     # depend on that host being up and cost every offline run a timeout. The

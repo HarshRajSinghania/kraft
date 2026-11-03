@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from support import fast_yaml
 from support.chain_builders import (  # re-exported: the v1_* family, and IN_PLACE
     IN_PLACE,  # noqa: F401
     v1_fix_loop_node,  # noqa: F401
@@ -276,7 +277,7 @@ def seed_v1_library(templates_dir: Path, *, agent_command: str | None = None) ->
     """
     templates_dir.mkdir(parents=True, exist_ok=True)
     library = (_REPO_ROOT / "config" / "library.yaml").read_text()
-    shipped_profiles = yaml.safe_load((_REPO_ROOT / "config" / "harnesses.yaml").read_text())
+    shipped_profiles = fast_yaml.load((_REPO_ROOT / "config" / "harnesses.yaml").read_text())
     agent_profiles = shipped_profiles.get("profiles") or {}
     if agent_command is None:
         write_harness_profiles(templates_dir, shipped_profiles["harnesses"])
@@ -294,8 +295,7 @@ def seed_v1_library(templates_dir: Path, *, agent_command: str | None = None) ->
         # separate override is added for it any more -- one used to exist
         # here and clobbered the shipped entry's own `defaults:` the moment
         # the two ids collided. Nothing rewrites a task's `harness:` any
-        # more: that rewrite is how the suite ran a library the product
-        # never ships (Task 5e).
+        # more: that rewrite is how the suite ran a library the product never ships (Task 5e).
         profiles = {
             id: {k: v for k, v in body.items() if k != "executable"} | {"provider": "fake"}
             for id, body in shipped_profiles["harnesses"].items()
@@ -310,12 +310,12 @@ def seed_v1_library(templates_dir: Path, *, agent_command: str | None = None) ->
         # so the nested run finishes the whole suite before the outer one
         # continues. A test that means to exercise the real builtin builds its
         # own chain (tests/executor/test_dispatch.py) and is untouched by this.
-        parsed = yaml.safe_load(library)
+        parsed = fast_yaml.load(library)
         for task in parsed.get("tasks", {}).values():
             if task.get("kind") == "builtin":
                 task.clear()
                 task.update({"kind": "subprocess", "command": "true"})
-        library = yaml.safe_dump(parsed, sort_keys=False)
+        library = fast_yaml.dump(parsed)
         # `$KRAFT_HOME/config/harnesses`, which is what
         # `paths.default_harnesses_dir()` reads -- *not* `templates_dir`, which
         # is `KRAFT_CONFIG_DIR` and a different directory under pytest
@@ -385,9 +385,9 @@ def write_harness_profiles(templates_dir: Path, profiles: dict) -> None:
     each other."""
     path = Path(templates_dir) / "harnesses.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
-    existing = (yaml.safe_load(path.read_text()) or {}) if path.is_file() else {}
+    existing = (fast_yaml.load(path.read_text()) or {}) if path.is_file() else {}
     merged = {**(existing.get("harnesses") or {}), **profiles}
-    path.write_text(yaml.safe_dump({**existing, "harnesses": merged}, sort_keys=False))
+    path.write_text(fast_yaml.dump({**existing, "harnesses": merged}))
 
 
 def write_agent_profiles(templates_dir: Path, profiles: dict) -> None:
@@ -395,8 +395,8 @@ def write_agent_profiles(templates_dir: Path, profiles: dict) -> None:
     Kraft-ps1ao), keeping its `harnesses:`."""
     path = Path(templates_dir) / "harnesses.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
-    existing = (yaml.safe_load(path.read_text()) or {}) if path.is_file() else {}
-    path.write_text(yaml.safe_dump({**existing, "profiles": profiles}, sort_keys=False))
+    existing = (fast_yaml.load(path.read_text()) or {}) if path.is_file() else {}
+    path.write_text(fast_yaml.dump({**existing, "profiles": profiles}))
 
 
 def harness_without(capability: str, harness_id: str = "claude"):
