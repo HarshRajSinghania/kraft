@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Stand-in for `claude` headless. Invoked as:
 #   fake-claude.sh -p <instr> --append-system-prompt <ctx> --output-format stream-json --verbose
-# CWD is the worktree. Modes via KRAFT_FAKE_CLAUDE: fix (default) | noop | slow.
+# CWD is the worktree. Modes via KRAFT_FAKE_CLAUDE: fix (default) | noop | slow | stall.
+# `stall` is `noop` that, as a fix-loop repair, still commits a file. The
+# default `fix` mode edits calc.py only once, so a second fix round edits
+# nothing and a `just dev` fix loop stops after its first round: that is the
+# product's behaviour (a round that changed nothing stops), not a fake bug.
 # The reported status defaults to "done"; KRAFT_FAKE_CLAUDE_STATUS overrides it,
 # and KRAFT_FAKE_CLAUDE_CONCERNS / KRAFT_FAKE_CLAUDE_QUESTION set the field that
 # goes with done_with_concerns / needs_context.
@@ -77,12 +81,29 @@ print_subagent_work() {
 LINES
 }
 
+# `stall` mode: a fix-loop repair commits a file even when it fails, so the loop
+# sees a round that changed something. A file, not an empty commit: a commit
+# touching none reads as nothing changed.
+stall_commit() {
+  case "$1" in
+    *.fix_loop.judge) ;;
+    *.fix_loop.*)
+      echo x > "stall-$$.txt"
+      git add "stall-$$.txt" >/dev/null 2>&1 || true
+      git -c user.name=t -c user.email=t@t commit -qm stall >/dev/null 2>&1 || true ;;
+  esac
+}
+
 # Per-invocation failure. KRAFT_FAKE_CLAUDE is per-server, so it cannot make one
 # work item fail while its neighbours succeed; the instruction can. The seed
 # script puts KRAFT_FAIL in a work item title to drive the needs_human path.
 for arg in "$@"; do
   case "$arg" in
-    *KRAFT_FAIL*) printf 'fake-claude: asked to fail\n' >&2; exit 3 ;;
+    *KRAFT_FAIL*)
+      if [ "$mode" = "stall" ]; then
+        stall_commit "$(printf '%s\n' "$@" | sed -n 's/^Hook point: //p' | head -1)"
+      fi
+      printf 'fake-claude: asked to fail\n' >&2; exit 3 ;;
     # break: the title reaches this script twice (-p and --append-system-prompt),
     # and sleeping once per copy doubles the delay the seed script waits on.
     *KRAFT_SLOW*) sleep "${KRAFT_FAKE_CLAUDE_DELAY:-15}"; break ;;
@@ -148,6 +169,8 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 field() { printf '%s\n' "$ctx" | sed -n "s/^$1: //p" | head -1; }
+
+if [ "$mode" = "stall" ]; then stall_commit "$(field 'Hook point')"; fi
 
 # The summary goes where the context says; Kraft records it itself, so the
 # result file reports no session_summary_ref.
