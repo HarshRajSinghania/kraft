@@ -312,18 +312,20 @@ def installed(
     `addons.yaml` not saved yet.
 
     The answer is kept until a file it was computed from changes (see
-    `signature`); a `verify` or `config` call is never answered from it.
+    `signature`); a `verify` or `config` call is never answered from it, and
+    only `verify` refreshes it.
     """
     global _memo
     from kraft import paths
 
     config_dir = Path(config_dir) if config_dir is not None else paths.config_dir()
     root = Path(addons_root) if addons_root is not None else addons_dir()
-    if verify or config is not None:
+    if config is not None:
         return _installed(config_dir, root / "store", verify, config)
     key = (str(config_dir), str(root))
     hit = _memo.get(key)
-    if hit is not None and hit[0] == signature(config_dir, hit[1]):
+    # A `verify` call recomputes, but its answer is the stronger one, so it is kept.
+    if not verify and hit is not None and hit[0] == signature(config_dir, hit[1]):
         return hit[1]
     before = signature(config_dir)
     found = _installed(config_dir, root / "store", verify, config)
@@ -587,8 +589,13 @@ def limits_problem(
     `maxima:`, lowered since the add-on was installed; None when all fit.
     `ancestors` (parent first) are read with it, so what it inherits and
     extends is checked too."""
+    from kraft.policy import InstancePolicy, InstancePolicyInput
     from kraft.templates.library import TemplateLibrary, TemplateLibraryError
 
+    # `lint()` judges under exactly this policy, so the two passes below agree
+    # and nothing can be "over": skip the library build and both lint passes.
+    if instance_policy == InstancePolicy.from_input(InstancePolicyInput()):
+        return None
     try:
         library = TemplateLibrary.from_mappings(
             {}, (), library_path=addon.root / "local-library.yaml", addons=[addon, *ancestors]
