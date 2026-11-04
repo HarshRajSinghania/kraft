@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ from support import harness, real_binaries, server
 from support.fake_beads import Bd, FakeBeads
 from support.harness import REAL_AGENT_BINARIES as _REAL_AGENT_BINARIES
 from support.harness import entry_of, fake_templates_dir, isolated_bd, make_repo
+from support.kept_lifespan import KeptLifespan
 
 from kraft import client as kraft_client
 from kraft import db
@@ -655,33 +657,25 @@ def _hermetic_api(tmp_path, monkeypatch):
 
 @pytest.fixture
 def app(tmp_path, monkeypatch):
-    """The app wired to client.transport.http(), with its lifespan entered per call.
-
-    cli.main() runs asyncio.run() itself, so — unlike `wired`, where one
-    coroutine owns the loop — the lifespan cannot stay open across the call.
-    Each handler opens and closes its own loop, so each gets its own lifespan.
-    """
+    """The app wired to client.transport.http(), its lifespan entered once, on the
+    first call, and held until the test ends: one start per test, not per call.
+    Whatever the server reads only at start is read once; a test that edits it
+    between calls and needs the server to see it is not for this fixture."""
     api = _hermetic_api(tmp_path, monkeypatch)
     monkeypatch.delenv("NO_COLOR", raising=False)
+    kept = KeptLifespan(api.app)
 
-    class Lifespan(httpx.AsyncClient):
-        """An AsyncClient that enters the app lifespan for the life of the client."""
-
-        async def __aenter__(self):
-            self._ctx = api.app.router.lifespan_context(api.app)
-            await self._ctx.__aenter__()
-            return await super().__aenter__()
-
-        async def __aexit__(self, *exc):
-            await super().__aexit__(*exc)
-            await self._ctx.__aexit__(*exc)
+    class Forward(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            return await kept.call(request)
 
     monkeypatch.setattr(
         kraft_client.transport,
         "http",
-        lambda: Lifespan(transport=httpx.ASGITransport(app=api.app), base_url="http://127.0.0.1"),
+        lambda: httpx.AsyncClient(transport=Forward(), base_url="http://127.0.0.1"),
     )
-    return api
+    yield api
+    kept.close()
 
 
 @pytest.fixture
@@ -727,7 +721,6 @@ async def stub_app(database, run_dirs):
             app = stub_app(policy=policy.Policy(...), templates_dir=tmp_path / "t")
             assert await archive.tick(app) == []
     """
-    import asyncio
     from types import SimpleNamespace
 
     apps = []
