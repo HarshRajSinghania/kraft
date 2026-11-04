@@ -289,7 +289,10 @@ install: bundle
 # "N deselected in 0.1s". Nothing ran, so nothing was shown to pass.
 #
 # In parallel, on the logical CPU count + 2 workers (a 4-CPU box ran the suite 15% faster
-# on 6 than on 4: one worker's waits leave cores for another's), unless the args say
+# on 6 than on 4: one worker's waits leave cores for another's) and with
+# `--dist worksteal` (xdist's default `load` hands each worker its share up front, so
+# a full run ended with one worker alone for ~20s and the other cores idle; a worker
+# that runs dry takes queued tests off the others instead), unless the args say
 # otherwise (`-n`, `-p no:xdist`),
 # ask for output a worker would lose (`-s` and its clusters, `--capture`,
 # `--log-cli*`, `--setup-show`, `--trace`) or name one test (`::`), where xdist's
@@ -335,7 +338,7 @@ test *ARGS:
     case " $* " in *" -n"*|*" --numprocesses"*|*" -p no:xdist "*|*"::"*) par= ;; esac
     case " $* " in *" --capture"*|*" --trace "*|*" --log-cli"*|*" --setup-show "*) par= ;; esac
     [[ " $* " =~ [[:space:]]-[vqxl]*s[vqxsl]*[[:space:]] ]] && par=
-    COVERAGE_CORE=ctrace uv run pytest ${mode:+"$mode"} ${par:+"$par"} "$@" 2>&1 | tee "$log"
+    COVERAGE_CORE=ctrace uv run pytest ${mode:+"$mode"} ${par:+"$par" --dist=worksteal} "$@" 2>&1 | tee "$log"
     status=${PIPESTATUS[0]}
     if [ -n "$*" ] && grep -qE '^collected 0 items$' "$log"; then
         echo "error: just test collected 0 items for the given args -- treating as a failure (Kraft-1v6ow)" >&2
