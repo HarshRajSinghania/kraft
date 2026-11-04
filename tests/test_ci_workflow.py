@@ -95,7 +95,7 @@ def test_changes_says_which_jobs_a_change_needs(tmp_path, event, paths, code, py
         write(repo, path, "x\n")
     commit_all(repo)
 
-    assert _changes(repo, base, event) == [f"code={code}", f"python={python}"]
+    assert _changes(repo, base, event)[:2] == [f"code={code}", f"python={python}"]
 
 
 @pytest.mark.parametrize("to", ["frontend/calc.py", "docs/calc.md"])
@@ -108,7 +108,40 @@ def test_a_python_file_moved_into_a_skipped_tree_is_still_a_python_change(tmp_pa
     git(repo, "mv", "calc.py", to)
     commit_all(repo)
 
-    assert _changes(repo, base, "pull_request") == ["code=true", "python=true"]
+    assert _changes(repo, base, "pull_request")[:2] == ["code=true", "python=true"]
+
+
+@pytest.mark.parametrize(
+    ("event", "paths", "pythons"),
+    [
+        pytest.param("push", ["README.md"], ["3.12", "3.13", "3.14"], id="a-push-runs-all-three"),
+        pytest.param(
+            "pull_request", ["src/kraft/a.py"], ["3.12", "3.14"], id="a-pr-runs-floor-and-newest"
+        ),
+        pytest.param(
+            "pull_request", ["frontend/src/a.tsx"], ["3.14"], id="no-python-changed-runs-the-newest"
+        ),
+        pytest.param("pull_request", ["docs/testing.md"], ["3.14"], id="docs-only-runs-the-newest"),
+    ],
+)
+def test_changes_picks_the_pythons_the_unit_tier_runs(tmp_path, event, paths, pythons):
+    repo = make_repo(tmp_path)
+    base = git(repo, "rev-parse", "HEAD")
+    for path in paths:
+        write(repo, path, "x\n")
+    commit_all(repo)
+
+    # No spaces: the value is one `name=value` line in $GITHUB_OUTPUT.
+    assert _changes(repo, base, event)[2] == f"pythons={json.dumps(pythons, separators=(',', ':'))}"
+
+
+def test_the_unit_tier_runs_the_pythons_changes_picked_and_all_three_if_it_failed():
+    """Without this the `pythons` output is computed and never read; an empty
+    output (the job failed) must fall back to every supported Python, so a
+    failed `changes` trims nothing."""
+    assert _JOBS["test"]["strategy"]["matrix"]["python-version"] == (
+        '${{ fromJSON(needs.changes.outputs.pythons || \'["3.12", "3.13", "3.14"]\') }}'
+    )
 
 
 _NEEDS = _JOBS["test-gate"]["needs"]

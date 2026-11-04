@@ -42,7 +42,11 @@ jobs:
     # the test job checks). `python` is false for those and for one that also
     # changes frontend/, with nothing else and no .py file among them: no
     # Python moved, so the unit tier runs on the newest Python alone and the
-    # real-CLI tier skips. Pushes to main run everything, and so does a PR if
+    # real-CLI tier skips. `pythons` is the unit tier's matrix: all three on a
+    # push to main, the floor and the newest on a pull request (3.13 sits
+    # between them, and a failure on it alone was as rare as on 3.12 or 3.14
+    # alone, and read as a flake), the newest alone when `python` is false.
+    # Pushes to main run everything, and so does a PR if
     # this job fails: nothing is trimmed or skipped except on an explicit
     # 'false'. The unit tests that read the docs still run on a docs-only
     # pull request, in `docs-tests`. The checkout is shallow and the step
@@ -52,6 +56,7 @@ jobs:
     outputs:
       code: ${{ steps.diff.outputs.code }}
       python: ${{ steps.diff.outputs.python }}
+      pythons: ${{ steps.diff.outputs.pythons }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: diff
@@ -60,7 +65,10 @@ jobs:
         run: |
           code=true
           python=true
+          # No spaces: the value is one `name=value` line in $GITHUB_OUTPUT.
+          pythons='["3.12","3.13","3.14"]'
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            pythons='["3.12","3.14"]'
             git fetch --no-tags --depth=1 origin "$BASE"
             # --no-renames: a rename is named by its new path alone, and a
             # Python file moved into docs/ would read as a docs change.
@@ -73,10 +81,12 @@ jobs:
             if [ -z "$(printf '%s\n' "$files" | grep -vE "^($docs|frontend/.*)$")" ] &&
               ! printf '%s\n' "$files" | grep -qE '\.py$'; then
               python=false
+              pythons='["3.14"]'
             fi
           fi
           echo "code=$code" | tee -a "$GITHUB_OUTPUT"
           echo "python=$python" | tee -a "$GITHUB_OUTPUT"
+          echo "pythons=$pythons" | tee -a "$GITHUB_OUTPUT"
 
   lint:
     runs-on: ubuntu-latest
@@ -115,15 +125,17 @@ jobs:
       - run: uv run python dev/check_tests.py
 
   test:
-    # The unit tier on every supported Python (`requires-python` in pyproject.toml
+    # The unit tier on the supported Pythons (`requires-python` in pyproject.toml
     # is the floor, 3.12; the newest is 3.14), each in three shards
     # (`KRAFT_TEST_SHARD`, read by the repo-root conftest.py). One wheel serves
-    # all of them, so this is the only place a version gap shows. A pull request
-    # that changes no Python (`changes`) runs the newest alone: every unit test
-    # still runs, since some read frontend/ files, but nothing in it can differ
-    # by Python version. Coverage and junit come from the newest Python only,
-    # one file per shard, and `test-report` below puts them together. fail-fast
-    # off, so one leg's failure doesn't hide another's.
+    # all of them, so this is the only place a version gap shows. `changes`
+    # picks the Pythons: all three on a push to main, the floor and the newest
+    # on a pull request, and when it fails, all three. A pull request that
+    # changes no Python runs the newest alone: every unit test still runs,
+    # since some read frontend/ files, but nothing in it can differ by Python
+    # version. Coverage and junit come from the newest Python only, one file
+    # per shard, and `test-report` below puts them together. fail-fast off, so
+    # one leg's failure doesn't hide another's.
     name: test (python ${{ matrix.python-version }}, ${{ matrix.shard }}/3)
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
@@ -131,7 +143,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ${{ fromJSON(needs.changes.outputs.python == 'false' && '["3.14"]' || '["3.12", "3.13", "3.14"]') }}
+        python-version: ${{ fromJSON(needs.changes.outputs.pythons || '["3.12", "3.13", "3.14"]') }}
         shard: [1, 2, 3]
     # Job-level, so it beats the workflow's UV_PYTHON for `uv run` too: `uv run`
     # rebuilds the venv whenever UV_PYTHON names another version than the one
