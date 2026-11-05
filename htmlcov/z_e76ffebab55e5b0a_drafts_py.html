@@ -65,7 +65,7 @@
             <a id="nextFileLink" class="nav" href="z_e76ffebab55e5b0a_forge_reads_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.17.0">coverage.py v7.17.0</a>,
-            created at 2026-11-04 19:06 +0000
+            created at 2026-11-05 08:39 +0000
         </p>
         <aside class="hidden">
             <button type="button" class="button_next_chunk" data-shortcut="j"></button>
@@ -607,7 +607,7 @@
     <p class="run run2"><span class="n"><a id="t525" href="#t525">525</a></span><span class="t">            <span class="nam">item</span><span class="op">.</span><span class="nam">OPS</span><span class="op">.</span><span class="nam">validate_python</span><span class="op">(</span><span class="nam">body</span><span class="op">.</span><span class="nam">ops</span><span class="op">)</span><span class="op">,</span> <span class="nam">mode</span><span class="op">=</span><span class="str">&quot;json&quot;</span><span class="op">,</span> <span class="nam">exclude_none</span><span class="op">=</span><span class="key">True</span>&nbsp;</span><span class="r"></span></p>
     <p class="run run2"><span class="n"><a id="t526" href="#t526">526</a></span><span class="t">        <span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t527" href="#t527">527</a></span><span class="t">    <span class="key">except</span> <span class="nam">ValidationError</span> <span class="key">as</span> <span class="nam">exc</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run"><span class="n"><a id="t528" href="#t528">528</a></span><span class="t">        <span class="key">raise</span> <span class="nam">HTTPException</span><span class="op">(</span><span class="num">422</span><span class="op">,</span> <span class="nam">str</span><span class="op">(</span><span class="nam">exc</span><span class="op">)</span><span class="op">)</span> <span class="key">from</span> <span class="key">None</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t528" href="#t528">528</a></span><span class="t">        <span class="key">raise</span> <span class="nam">HTTPException</span><span class="op">(</span><span class="num">422</span><span class="op">,</span> <span class="nam">config_mod</span><span class="op">.</span><span class="nam">first_error</span><span class="op">(</span><span class="nam">exc</span><span class="op">,</span> <span class="str">&quot;ops&quot;</span><span class="op">)</span><span class="op">)</span> <span class="key">from</span> <span class="key">None</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t529" href="#t529">529</a></span><span class="t">    <span class="key">await</span> <span class="nam">st</span><span class="op">.</span><span class="nam">db</span><span class="op">.</span><span class="nam">write</span><span class="op">(</span><span class="key">lambda</span> <span class="nam">c</span><span class="op">:</span> <span class="nam">store</span><span class="op">.</span><span class="nam">put_item</span><span class="op">(</span><span class="nam">c</span><span class="op">,</span> <span class="nam">wid</span><span class="op">,</span> <span class="nam">ops_</span><span class="op">)</span> <span class="key">if</span> <span class="nam">ops_</span> <span class="key">else</span> <span class="nam">store</span><span class="op">.</span><span class="nam">delete_item</span><span class="op">(</span><span class="nam">c</span><span class="op">,</span> <span class="nam">wid</span><span class="op">)</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t530" href="#t530">530</a></span><span class="t">    <span class="key">return</span> <span class="nam">_item_view</span><span class="op">(</span><span class="nam">st</span><span class="op">,</span> <span class="nam">row</span><span class="op">,</span> <span class="nam">st</span><span class="op">.</span><span class="nam">db</span><span class="op">.</span><span class="nam">read</span><span class="op">(</span><span class="key">lambda</span> <span class="nam">c</span><span class="op">:</span> <span class="nam">store</span><span class="op">.</span><span class="nam">get_item</span><span class="op">(</span><span class="nam">c</span><span class="op">,</span> <span class="nam">wid</span><span class="op">)</span><span class="op">)</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t531" href="#t531">531</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
@@ -689,7 +689,7 @@
             <a class="nav" href="z_e76ffebab55e5b0a_forge_reads_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.17.0">coverage.py v7.17.0</a>,
-            created at 2026-11-04 19:06 +0000
+            created at 2026-11-05 08:39 +0000
         </p>
     </div>
 </footer>
