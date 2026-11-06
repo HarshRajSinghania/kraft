@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Container, Iterator, Mapping
+from collections.abc import Container, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from enum import StrEnum
@@ -480,6 +480,15 @@ class TaskBase(BaseModel):
     #: component unless it says `false` here.
     skippable: StrictBool = True
     icon: Icon | None = None
+    #: The earlier tasks whose `outputs` this one reads, as `step.task` (a
+    #: writer in this task's own node) or `node.step.task` (anywhere). An agent
+    #: or subprocess task reads them; `Chain` checks each names a writer that
+    #: runs before this task (`_reads_name_earlier_writers`).
+    reads: list[StrictStr] = Field(default_factory=list)
+
+    #: Whether this kind delivers `reads` to the task. Builtin and forge tasks
+    #: refuse a non-empty list, so the Config tab hides the key there.
+    TAKES_READS: ClassVar[bool] = False
 
     #: What only an agent launch reads, as `sources` names it (a policy cap as
     #: `policy.<cap>`). Steering is text for an agent's prompt, and the
@@ -502,9 +511,13 @@ class TaskBase(BaseModel):
         """What this task accepts but nothing reads: its kind's `AGENT_ONLY`.
         An `on_failure` recovery runs under this task's policy scope
         (`_handler_steps`), so with one the caps bound its repair agent and
-        only `steering` goes unread. The chain editor's Config tab leaves
-        these out unless the file sets one."""
-        return self.AGENT_ONLY & {"steering"} if self.on_failure is not None else self.AGENT_ONLY
+        only `steering` goes unread. A kind that takes no `reads` adds that
+        key. The chain editor's Config tab leaves these out unless the file
+        sets one."""
+        agent_only = (
+            self.AGENT_ONLY & {"steering"} if self.on_failure is not None else self.AGENT_ONLY
+        )
+        return agent_only if self.TAKES_READS else agent_only | {"reads"}
 
     def for_recovery(self) -> frozenset[str]:
         """The caps this task does not read but its `on_failure` recovery runs
@@ -521,6 +534,85 @@ class TaskBase(BaseModel):
                 "so a task-level check would fail on a sibling's writes"
             )
         return data
+
+    @model_validator(mode="after")
+    def _reads_are_qualified(self) -> Self:
+        resolve_reads("_", self.reads)
+        if self.reads and not self.TAKES_READS:
+            raise ValueError("reads: only an agent or subprocess task reads outputs")
+        return self
+
+
+#: `outputs.files` names a plain relative path; `variables.env` is Kraft's own.
+VARIABLES_FILE = "variables.env"
+_VARIABLE_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
+_GLOB = re.compile(r"[*?\[\]{}]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+class OutputsDecl(BaseModel):
+    """What a task leaves behind for a later task's `reads`: files named inside
+    `$KRAFT_OUTPUT_DIR`, and keys of its `variables.env`. Kraft checks and
+    snapshots them when the task ends (`kraft.outputs`)."""
+
+    model_config = _CONFIG
+
+    files: list[StrictStr] = Field(default_factory=list)
+    variables: list[StrictStr] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _declares_something(self) -> Self:
+        if not self.files and not self.variables:
+            raise ValueError("outputs: declare at least one of files and variables")
+        seen: set[str] = set()
+        for name in self.files:
+            _plain_relative(name)
+            if name.casefold() == VARIABLES_FILE:
+                raise ValueError(f"outputs.files: {VARIABLES_FILE} is Kraft's; declare variables")
+            if name.casefold() in seen:
+                raise ValueError(f"outputs.files: {name!r} repeats a name, or differs only by case")
+            seen.add(name.casefold())
+        for name in self.files:
+            if any(other.casefold().startswith(f"{name.casefold()}/") for other in self.files):
+                raise ValueError(f"outputs.files: {name!r} is a file and also a folder of another")
+        for key in self.variables:
+            if not _VARIABLE_NAME.fullmatch(key):
+                raise ValueError(f"outputs.variables: {key!r} must match [A-Z][A-Z0-9_]*")
+        if len(set(self.variables)) != len(self.variables):
+            raise ValueError("outputs.variables: a name is declared twice")
+        return self
+
+
+def _plain_relative(name: str) -> None:
+    """Refuse a file name that is not a plain path inside the output folder."""
+    parts = name.split("/")
+    if (
+        not name
+        or name.startswith("/")
+        or any(part in ("", ".", "..") for part in parts)
+        or _GLOB.search(name)
+        or _CONTROL.search(name)
+        or "\\" in name
+    ):
+        raise ValueError(
+            f"outputs.files: {name!r} must be a plain relative path inside the output folder"
+        )
+
+
+def resolve_reads(node_id: str, reads: Sequence[str]) -> tuple[str, ...]:
+    """The writer task paths `reads` names, read from the node `node_id`: a
+    two-segment entry (`step.task`) is that node's own, a three-segment one
+    (`node.step.task`) is kept as written. Anything else is refused."""
+    out = []
+    for entry in reads:
+        parts = entry.split(PATH_SEPARATOR)
+        if not 2 <= len(parts) <= 3 or not all(parts):
+            raise ValueError(
+                f"reads: {entry!r} must be step.task or node.step.task, never a bare task id "
+                "or more than three segments"
+            )
+        out.append(f"{node_id}{PATH_SEPARATOR}{entry}" if len(parts) == 2 else entry)
+    return tuple(out)
 
 
 class TestSuite(StrEnum):
@@ -555,6 +647,7 @@ class BuiltinTask(TaskBase):
 
 class AgentTask(TaskBase):
     AGENT_ONLY: ClassVar[frozenset[str]] = frozenset()
+    TAKES_READS: ClassVar[bool] = True
 
     kind: Literal[TaskKind.AGENT]
     harness: Identifier
@@ -577,6 +670,14 @@ class AgentTask(TaskBase):
     #: Tried in order when a launch is rate-limited or its harness unavailable
     #: (`fallback-is-opt-in`). `None` is unset; `[]` is "none".
     fallback: list[FallbackEntry] | None = None
+    #: What this task leaves for a later task's `reads`. Not on a fan-out task
+    #: (`_outputs_not_on_fan_out`) and not in a handler slot (`_refuse_outputs`).
+    outputs: OutputsDecl | None = None
+
+    @model_validator(mode="after")
+    def _outputs_not_on_fan_out(self) -> Self:
+        _refuse_outputs_on_fan_out(self)
+        return self
 
     @model_validator(mode="after")
     def _one_route(self) -> Self:
@@ -586,6 +687,14 @@ class AgentTask(TaskBase):
                 "takes its model from one or the other"
             )
         return self
+
+
+def _refuse_outputs_on_fan_out(task: AgentTask | SubprocessTask) -> None:
+    if task.outputs is not None and task.scope is not TaskScope.ONCE:
+        raise ValueError(
+            f"outputs: task {task.id!r} runs once per repository; "
+            "a fan-out task cannot declare outputs"
+        )
 
 
 #: An agent task's two routes to a model (`AgentTask.profile`).
@@ -604,8 +713,17 @@ def displaced_route(nearer: Mapping[str, object]) -> tuple[str, ...]:
 
 
 class SubprocessTask(TaskBase):
+    TAKES_READS: ClassVar[bool] = True
+
     kind: Literal[TaskKind.SUBPROCESS]
     command: StrictStr = Field(min_length=1)
+    #: See `AgentTask.outputs`.
+    outputs: OutputsDecl | None = None
+
+    @model_validator(mode="after")
+    def _outputs_not_on_fan_out(self) -> Self:
+        _refuse_outputs_on_fan_out(self)
+        return self
 
 
 class ForgeTask(TaskBase):
@@ -871,6 +989,7 @@ def _refuse_nested_handlers(where: str, shape: ExecutionShape | None) -> None:
     for task in shape.own_tasks():
         if task.on_failure is not None:
             raise ValueError(f"{where}: task {task.id!r} cannot declare its own on_failure")
+        _refuse_outputs(where, task)
 
 
 def _refuse_read_only(where: str, shape: ExecutionShape | None) -> None:
@@ -886,9 +1005,18 @@ def _refuse_read_only(where: str, shape: ExecutionShape | None) -> None:
             raise ValueError(f"{where}: step {step.id!r} cannot be read_only: it writes by design")
 
 
+def _refuse_outputs(where: str, task: TaskBase) -> None:
+    """Only a task in an execution node's own steps can leave outputs: a
+    handler may run more than once, or before any reader could name it."""
+    if getattr(task, "outputs", None) is not None:
+        raise ValueError(f"{where}: task {task.id!r} cannot declare outputs")
+
+
 def _refuse_handler_on(where: str, task: TaskBase | None) -> None:
     if task is not None and task.on_failure is not None:
         raise ValueError(f"{where} {task.id!r} cannot declare its own on_failure")
+    if task is not None:
+        _refuse_outputs(where, task)
 
 
 class RecoveryPlan(ExecutionShape):
@@ -1281,6 +1409,70 @@ class Chain(BaseModel):
                         f"{task.path}: {task.task.target.value} runs before the final gate "
                         f"{self.nodes[final].id!r} approves it"
                     )
+        return self
+
+    @model_validator(mode="after")
+    def _reads_name_earlier_writers(self) -> Self:
+        """Every `reads` entry names a task that declares `outputs` and sits
+        before the reader. "Before" is an earlier node, or an earlier step of
+        the reader's own node (never a sibling in its step, which runs
+        concurrently). A handler slot of the writer's node reads by where it
+        runs: a node's `on_failure`, fix loop, judge and escalation may read
+        any of its steps, and a step's or task's `on_failure` the steps up to
+        and including its own step. A conflict handler, a merge-rejection
+        repair and a gate's reviewer read nothing. A handler may run before
+        its writer did, and then gets nothing, as after a skip."""
+        resolved = ResolvedChain.from_chain(self)
+        # task path -> (node position, step position, whether it declares outputs)
+        writers: dict[str, tuple[int, int, bool]] = {}
+        for i, node in enumerate(resolved.nodes):
+            for j, step in enumerate(node.steps):
+                for task in step.tasks:
+                    writers[task.path] = (i, j, getattr(task.task, "outputs", None) is not None)
+
+        def check(reader: ResolvedTask, node_at: int, last_step: int | None) -> None:
+            """`last_step`: the latest step of the reader's own node it may read
+            from; `None` where it may read no step outputs at all."""
+            node = resolved.nodes[node_at]
+            for entry, path in zip(
+                reader.task.reads, resolve_reads(node.id, reader.task.reads), strict=True
+            ):
+                where = f"{reader.path}: reads {entry!r}"
+                if last_step is None:
+                    raise ValueError(f"{where}, but a task here cannot read step outputs")
+                if path not in writers:
+                    raise ValueError(f"{where}, which names no task in a node's own steps")
+                at_node, at_step, declares = writers[path]
+                if not declares:
+                    raise ValueError(f"{where}, which declares no outputs")
+                if at_node > node_at or (at_node == node_at and at_step > last_step):
+                    raise ValueError(f"{where}, which does not run before it")
+
+        for i, node in enumerate(resolved.nodes):
+            last = len(node.steps) - 1
+            for j, step in enumerate(node.steps):
+                for task in step.tasks:
+                    # A sibling in the same step runs concurrently: step j-1 at most.
+                    check(task, i, j - 1)
+                    for plan in task.on_failure:
+                        for handler in plan.tasks:
+                            check(handler, i, j)
+                for plan in step.on_failure:
+                    for handler in plan.tasks:
+                        check(handler, i, j)
+            for group in (node.on_failure, node.fix_loop):
+                for plan in group:
+                    for handler in plan.tasks:
+                        check(handler, i, last)
+            for dedicated in (node.judge, node.escalation):
+                if dedicated is not None:
+                    check(dedicated, i, last)
+            for group in (node.on_conflict, node.on_merge_rejected):
+                for plan in group:
+                    for handler in plan.tasks:
+                        check(handler, i, None)
+            if node.auto_review is not None:
+                check(node.auto_review, i, None)
         return self
 
 

@@ -21,6 +21,7 @@ from kraft import (
     inplace,
     item_paths,
     node_runs,
+    outputs,
     reviewed_head,
     start_queue,
     storage,
@@ -589,6 +590,7 @@ async def abandon_work_item(wid: str, request: Request, body: AbandonWorkItem | 
     # the event loop.
     await asyncio.to_thread(_remove_item_files, st.run_dirs, wid)
     storage.forget_documents(st, wid)
+    storage.forget_outputs(st, wid)
     return {"id": wid, "status": "abandoned", **removed}
 
 
@@ -652,6 +654,11 @@ async def _archive_one(app, row, by: str, *, reason: str | None = None) -> dict:
         else:  # an in-place checkout's HEAD is the person's, not the item's
             extra |= await asyncio.to_thread(_rescue_detached_head, repo, worktree, wid)
         await st.db.write(lambda c: store.archive_work_item(c, wid, by, reason=reason, **extra))
+        # Archiving keeps an item's logs, results and documents, but not its step outputs: a
+        # task wrote them for a reader that will not run again. Ahead of the early returns
+        # below, so an in-place item's and one whose worktree stayed are freed too.
+        await asyncio.to_thread(item_paths.remove_tree, item_paths.outputs_dir(st.run_dirs, wid))
+        storage.forget_outputs(st, wid)
         if in_place:
             return {"worktree_removed": False, "in_place": True, **dropped, **extra}
         for where, count in kept.items():
@@ -2458,6 +2465,7 @@ async def skip_work_item(wid: str, body: Skip, request: Request):
             )
             for s in sessions:
                 _terminate(s["pid"], started=s["pid_start_time"])
+            await _clear_outputs(st, wid, row, node_id)
 
             try:
                 deps.spawn(
@@ -2481,6 +2489,17 @@ async def skip_work_item(wid: str, body: Skip, request: Request):
             except deps.AlreadyRunning:
                 raise HTTPException(409, "a walk is already running for this work item") from None
             return deps.work_item_answer(st, wid)
+
+
+async def _clear_outputs(st, wid: str, row, node_id: str, under: str | None = None) -> None:
+    """A skip supersedes the step outputs of the writers it skips (`under` a
+    path, else the whole node), a running writer included: a later reader sees
+    nothing of them."""
+    chain = store.materialized_chain_of(row)
+    if chain is None:
+        return
+    for writer in outputs.writers_in(chain, node_id, under):
+        await asyncio.to_thread(outputs.clear, st.run_dirs, wid, writer)
 
 
 def _skip_node_id(st, wid: str, row) -> str | None:
@@ -2528,6 +2547,7 @@ async def _skip_within_node(st, request: Request, wid: str, row, target: ChainPa
         )
         for s in sessions:
             _terminate(s["pid"], started=s["pid_start_time"])
+        await _clear_outputs(st, wid, row, target.node.id, target.path)
         return deps.work_item_answer(st, wid)
     async with stops.claimed_or_stopped(
         st.db,
@@ -2546,6 +2566,7 @@ async def _skip_within_node(st, request: Request, wid: str, row, target: ChainPa
                 409, "work item status changed; try again"
             )
         await st.db.write(lambda c: store.skip_scope(c, wid, target.path, note))
+        await _clear_outputs(st, wid, row, target.node.id, target.path)
         try:
             deps.spawn(
                 request.app,

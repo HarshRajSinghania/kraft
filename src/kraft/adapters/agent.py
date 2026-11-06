@@ -1156,6 +1156,12 @@ async def _run_agent_task(
     #: In place: `cwd` is this session's copy of the branch (`inplace.copy_path`), made once
     #: the session holds the checkout's lease, instead of taking the checkout itself.
     in_copy: bool = False,
+    #: More of the worker's environment, set by the dispatch that knows it:
+    #: `KRAFT_OUTPUT_DIR` and `KRAFT_READS_DIR` (`kraft.outputs`).
+    extra_env: Mapping[str, str] | None = None,
+    #: More host paths a sandboxed launch mounts read-only: the snapshots a
+    #: reader names (`kraft.outputs`).
+    extra_ro: tuple[str, ...] = (),
 ) -> str:
     runner = None if runner == "local" else runner
     # An update holds the moment: no session starts until the server restarts.
@@ -1591,6 +1597,7 @@ async def _run_agent_task(
             **({"KRAFT_BOT_FEEDBACK": bot_feedback} if bot_feedback else {}),
             **config_env,
             **rules_env,
+            **(extra_env or {}),
         },
         post_resolve=_resolve_status(artifact, work_item_id, run_dirs, cwd, reader),
         round=round,
@@ -1612,7 +1619,7 @@ async def _run_agent_task(
         takes_checkout=takes_checkout,
         tips=tips,
         model=model,
-        ro_paths=(*rules_files, *remote_ro),
+        ro_paths=(*rules_files, *remote_ro, *extra_ro),
         before_launch=before_launch if borrows or in_copy or on_session or after_checkout else None,
         runner=runner,
         codex_hook=codex_hook,
