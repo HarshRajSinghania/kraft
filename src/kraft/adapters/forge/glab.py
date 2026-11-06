@@ -112,6 +112,7 @@ _GLAB_STATES: dict[str, CIState] = {
     "success": "success",
     "failed": "failed",
     "canceled": "pending",
+    "canceling": "pending",
     "skipped": "failed",
     "running": "pending",
     "pending": "pending",
@@ -525,6 +526,56 @@ class GlabCli(mr_ops.CliWaits):
             no_checks=True,
         )
 
+    async def pipeline_status(self, *, repo: Path, pipeline_id: str) -> CIStatus:
+        """One pipeline, read by its id (the global `id`, never the `iid`),
+        with no fallback to the newest pipeline on a ref. A pipeline of another
+        project answers 404, a `ForgeError` with reason `not_found`. A pipeline
+        that ran nothing says so in `nothing_ran`; one parked on a manual job
+        says which in `blocked_on`."""
+        top = await self._api(repo, f"projects/:id/pipelines/{pipeline_id}")
+        if not isinstance(top, dict):
+            raise ForgeError(
+                f"GET projects/:id/pipelines/{pipeline_id}: answered without a pipeline"
+            )
+        status = await self._read_pipeline(repo, top, str(top.get("sha") or ""))
+        raw_state = str(top.get("status", ""))
+        blocked_on = ""
+        if raw_state == "manual":
+            manual = await self._api(
+                repo,
+                f"projects/:id/pipelines/{pipeline_id}/jobs",
+                fields={"scope[]": "manual", "per_page": 100},
+            )
+            first = next((j for j in manual or [] if isinstance(j, dict) and j.get("name")), None)
+            blocked_on = str(first["name"]) if first else "a manual job"
+        nothing_ran = raw_state == "skipped" or (
+            status.state == "failed"
+            and not status.failed_jobs
+            and not top.get("yaml_errors")
+            and await self._ran_no_jobs(repo, pipeline_id)
+        )
+        summary = (
+            f"pipeline {top.get('id', pipeline_id)} on {top.get('ref', '')} at "
+            f"{str(top.get('sha') or '')[:7]}, created {top.get('created_at', '')}"
+        )
+        return replace(
+            status,
+            jobs=(summary, *status.jobs),
+            nothing_ran=nothing_ran,
+            blocked_on=blocked_on,
+        )
+
+    async def _ran_no_jobs(self, repo: Path, pipeline_id: str) -> bool:
+        """Whether the forge confirms the pipeline has no job at all; a read
+        that fails is not a confirmation."""
+        try:
+            jobs = await self._paged(
+                repo, f"projects/:id/pipelines/{pipeline_id}/jobs", strict=True
+            )
+        except ForgeError:
+            return False
+        return not jobs
+
     async def _read_pipeline(self, repo: Path, top: dict, sha: str) -> CIStatus:
         """One pipeline that answers for `sha` (`_answered_for`), as a
         `CIStatus`: `sha` is the head it tested, never a merge commit's own."""
@@ -636,7 +687,29 @@ class GlabCli(mr_ops.CliWaits):
             return (), _UNREADABLE_JOBS
         jobs_raw = [j for j in jobs_all if isinstance(j, dict)]
         failed_raw = [j for j in jobs_raw if str(j.get("status", "")) == "failed"]
+        # A downstream pipeline (`strategy: depend`) fails its bridge, a job the
+        # jobs list leaves out: red code, never the zero-jobs infrastructure
+        # shape below. Read beside the jobs, so a pipeline whose only failure is
+        # a bridge is not mistaken for one that ran nothing.
+        bridges: list[FailedJob] = []
+        try:
+            bridges_all = await self._paged(
+                repo, f"projects/:id/pipelines/{pipeline_id}/bridges", strict=True
+            )
+        except ForgeError:
+            if not failed_raw:
+                return (), _UNREADABLE_JOBS
+        else:
+            bridges = [
+                FailedJob(str(b.get("name", "")), "failed", "downstream_failed")
+                for b in bridges_all
+                if isinstance(b, dict) and str(b.get("status", "")) == "failed"
+            ]
         if not failed_raw:
+            if bridges:
+                return tuple(f"job {b.name}: failed ({b.failure_reason})" for b in bridges), tuple(
+                    bridges
+                )
             yaml_errors = data.get("yaml_errors")
             if yaml_errors:
                 return (f"pipeline config error: {yaml_errors}",), (
@@ -669,7 +742,8 @@ class GlabCli(mr_ops.CliWaits):
             )
             for j in failed_raw[2:]
         ]
-        return detail, tuple(failed_jobs)
+        detail += tuple(f"job {b.name}: failed ({b.failure_reason})" for b in bridges)
+        return detail, (*failed_jobs, *bridges)
 
     async def _bot_review(self, repo: Path, branch: str, bot: str) -> ReviewResult:
         """GitLab has no review state: `bot`'s unresolved discussions are

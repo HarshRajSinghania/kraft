@@ -335,6 +335,13 @@ class CIStatus:
     #: a branch whose CI does not run on a push (Kraft-rbjo3, both backends'
     #: `branch_ci_status`).
     no_checks: bool = False
+    #: The pipeline settled without running anything: skipped, neutral, stale,
+    #: or zero jobs (`pipeline_status`). Not `no_checks`, which is "nothing is
+    #: registered *yet*". Never green.
+    nothing_ran: bool = False
+    #: The name of a manual job or approval a pending pipeline waits on a
+    #: person for (`pipeline_status`). "" when it waits on nothing of the sort.
+    blocked_on: str = ""
 
 
 @dataclass(frozen=True)
@@ -439,6 +446,13 @@ class Forge(Protocol):
     async def branch_ci_status(
         self, *, repo: Path, branch: str, head_sha: str, pipeline_id: str = ""
     ) -> CIStatus: ...
+    async def pipeline_status(self, *, repo: Path, pipeline_id: str) -> CIStatus:
+        """One CI pipeline (a GitLab pipeline `id`, a GitHub Actions run id),
+        read directly: no merge request, no ref, no fallback to another
+        pipeline. A pipeline the repository does not hold is a `ForgeError`
+        with reason `not_found`."""
+        ...
+
     async def merge(self, *, repo: Path, branch: str, mr: MR, head: str) -> None:
         """Ask the forge to merge `mr`, and only at `head`, the full sha it may
         merge: the forge refuses (`HeadMoved`) any other, now or whenever it
@@ -534,6 +548,16 @@ class FakeForge:
     #: ("" for an unpinned call), so a test can see it threaded through
     #: without a real GitLab (Kraft-ivh1).
     pipeline_ids_requested: list[str] = field(default_factory=list)
+    #: What `pipeline_status` answers, per pipeline id: each call takes the
+    #: next entry and the last repeats. A `ForgeError` entry is raised. (Not
+    #: `pipelines`: that is the read method below.)
+    pipeline_statuses: dict[str, list[CIStatus | ForgeError]] = field(default_factory=dict)
+    #: Every id `pipeline_status` was asked for, in call order. Apart from
+    #: `pipeline_ids_requested`, which belongs to `ci_status`.
+    pipeline_status_ids: list[str] = field(default_factory=list)
+    #: How many times `find_mr` was called, for a test to prove a read never
+    #: went looking for a merge request.
+    find_mr_calls: int = 0
     #: Parallel to `ci_states`: the pipeline id each successive `ci_status`
     #: call reports back (Kraft-ivh1). Defaults to "" -- a test that never
     #: sets this exercises no pinning, same as `ci_shas`' default. Task 4
@@ -738,6 +762,16 @@ class FakeForge:
             no_checks=self.ci_no_checks,
         )
 
+    async def pipeline_status(self, *, repo: Path, pipeline_id: str) -> CIStatus:
+        self.pipeline_status_ids.append(pipeline_id)
+        script = self.pipeline_statuses.get(pipeline_id)
+        if not script:
+            raise ForgeError(f"no pipeline {pipeline_id}", status=404, reason="not_found")
+        answer = self._next(script)
+        if isinstance(answer, ForgeError):
+            raise answer
+        return answer
+
     async def branch_ci_status(
         self, *, repo: Path, branch: str, head_sha: str = "", pipeline_id: str = ""
     ) -> CIStatus:
@@ -865,6 +899,7 @@ class FakeForge:
         return recorded is None or recorded == str(repo)
 
     async def find_mr(self, *, repo: Path, branch: str) -> MRRef | None:
+        self.find_mr_calls += 1
         numbers = [n for n, b in self.opened.items() if b == branch and self._matches(n, repo)]
         if not numbers:
             return None

@@ -67,6 +67,7 @@ from kraft.templates.models import (
     BuiltinAction,
     BuiltinTask,
     ExecutionMode,
+    ForgeAction,
     ForgeTask,
     ResolvedNode,
     ResolvedStep,
@@ -1810,6 +1811,14 @@ async def _dispatch_task_in(
 
     if isinstance(t, ForgeTask):
         forges, forges_error = launch.forges() if launch and launch.forges else (None, None)
+        # Only a `ci.pipeline` wait reads a step output; `declared_variables`
+        # re-validates the item's whole chain, so no other forge dispatch (each
+        # `mr.ci` poll, `mr.open_draft`) pays for it.
+        reads: tuple[str, ...] = ()
+        declared: dict[str, tuple[str, ...]] = {}
+        if t.target is ForgeAction.CI_PIPELINE:
+            reads = resolve_reads(node.id, t.reads)
+            declared = await asyncio.to_thread(declared_variables, work_item_row, reads)
         return await _forge.run_task(
             db,
             run_dirs,
@@ -1852,6 +1861,9 @@ async def _dispatch_task_in(
                 for other in node.tasks()
             ),
             grace=t.grace,
+            pipeline=t.pipeline,
+            reads=reads,
+            declared=declared,
             **common,
         )
 
