@@ -17,6 +17,7 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 
+from kraft import render
 from kraft.vocab import WorkItemStatus
 
 #: Source classes the log modal filters on.
@@ -113,7 +114,6 @@ def _tool_target(inp: object) -> str:
 
 #: A sub-agent's label is cut here: it prefixes every one of its rows.
 LABEL_MAX = 200
-_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _RUNNING = "Running "
 
@@ -123,13 +123,13 @@ def plain_lines(path: Path) -> Iterator[str]:
     removed, read as it streams. The file itself is not touched."""
     with path.open("rb") as fh:
         for line in fh:
-            yield _ANSI.sub("", line.decode("utf-8", errors="replace"))
+            yield render.strip_ansi(line.decode("utf-8", errors="replace"))
 
 
 def label(text: str) -> str:
     """`text` as a one-line label: whitespace runs folded, escape sequences and
     control characters dropped, cut to `LABEL_MAX`."""
-    text = _CONTROL.sub("", _ANSI.sub("", re.sub(r"\s+", " ", text))).strip()
+    text = _CONTROL.sub("", render.strip_ansi(re.sub(r"\s+", " ", text))).strip()
     return text if len(text) <= LABEL_MAX else text[: LABEL_MAX - 1] + "…"
 
 
