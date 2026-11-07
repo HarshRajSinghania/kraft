@@ -78,21 +78,19 @@ def test_a_cache_hit_does_not_fetch(cache, monkeypatch):
     assert update.latest().tag == "v0.4.0"
 
 
-def test_an_expired_cache_refetches(cache, monkeypatch):
+@pytest.mark.parametrize(
+    "checked_at", [0, 9_999_999_999, float("nan")], ids=["expired", "future-dated", "nan"]
+)
+def test_a_stale_cache_refetches(cache, monkeypatch, checked_at):
+    """A clock that jumped back leaves checked_at in the future: stale, not fresh."""
     monkeypatch.setattr(update, "_fetch", _fetch(RELEASE_JSON))
     update.latest()
     stale = json.loads(cache.read_text())
-    stale["checked_at"] = 0
+    stale["checked_at"] = checked_at
     cache.write_text(json.dumps(stale))
-    newer = [
-        {
-            "tag_name": "v0.5.0",
-            "draft": False,
-            "prerelease": False,
-            "assets": [{"name": "k.whl", "browser_download_url": "https://x/n.whl"}],
-        }
-    ]
-    monkeypatch.setattr(update, "_fetch", _fetch(newer))
+    monkeypatch.setattr(update, "_fetch", _fetch([_release("v0.5.0")]))
+    assert update.latest_in_major(0).tag == "v0.5.0"
+    cache.write_text(json.dumps(stale))
     assert update.latest().tag == "v0.5.0"
 
 
