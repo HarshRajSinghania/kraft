@@ -38,6 +38,11 @@ class WorkItemEvent(StrEnum):
     PLAN_PROGRESS = "plan_progress"
     STEER_CONTEXT_SET = "steer_context_set"
     STEER_UNDELIVERED = "steer_undelivered"
+    SLICES_NOT_FORKED = "slices_not_forked"
+    SLICES_FORKED = "slices_forked"
+    SLICES_JOINED = "slices_joined"
+    SLICE_DROPPED = "slice_dropped"
+    SLICE_PAUSED = "slice_paused"
 
 
 _PLAIN = EventTraits()
@@ -72,6 +77,11 @@ WORK_ITEM_EVENT_TRAITS = total(
         WorkItemEvent.PLAN_PROGRESS: _PLAIN,
         WorkItemEvent.STEER_CONTEXT_SET: _PLAIN,
         WorkItemEvent.STEER_UNDELIVERED: _PLAIN,
+        WorkItemEvent.SLICES_NOT_FORKED: _PLAIN,
+        WorkItemEvent.SLICES_FORKED: _PLAIN,
+        WorkItemEvent.SLICES_JOINED: _PLAIN,
+        WorkItemEvent.SLICE_DROPPED: _PLAIN,
+        WorkItemEvent.SLICE_PAUSED: _PLAIN,
     },
     name="WORK_ITEM_EVENT_TRAITS",
 )

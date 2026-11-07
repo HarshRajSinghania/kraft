@@ -12,11 +12,13 @@ export interface Step {
  *  and the item then retries and skips only at node level (lifecycle's path
  *  grammar does not know its tasks). */
 export function stepsOf(node: ChainNode): { steps: Step[]; legacy: boolean } {
-  const groups = node.steps ?? node.tasks.map((t) => [t]);
-  const legacy = groups.flat().some((t) => t.split(".").length !== 3);
+  const groups = node.steps ?? (node.tasks ?? []).map((t) => [t]);
+  // A path's `step.task` after the node's id, which is a path itself inside a group (`slices.implementation`).
+  const own = (t: string) => (t.startsWith(`${node.id}.`) ? t.slice(node.id.length + 1).split(".") : []);
+  const legacy = groups.flat().some((t) => own(t).length !== 2);
   return {
     legacy,
-    steps: groups.map((tasks, i) => ({ id: legacy ? String(i + 1) : tasks[0].split(".")[1], tasks })),
+    steps: groups.map((tasks, i) => ({ id: legacy ? String(i + 1) : own(tasks[0])[0], tasks })),
   };
 }
 

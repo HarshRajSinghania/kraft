@@ -31,16 +31,17 @@ async def tick(app) -> list[str]:
 
     st = app.state
     after_days = st.policy.archive_after_days if st.policy is not None else None
-    if not after_days:
-        return []
-    cutoff = (datetime.fromisoformat(_now()) - timedelta(days=after_days)).isoformat()
-    due = st.db.read(
-        lambda c: c.execute(
-            f"SELECT * FROM work_items WHERE status IN ({in_list(admitting(Verb.ARCHIVE))}) "
-            "AND archived_at IS NULL AND updated_at <= ?",
-            (cutoff,),
-        ).fetchall()
-    )
+    due = []
+    if after_days:
+        cutoff = (datetime.fromisoformat(_now()) - timedelta(days=after_days)).isoformat()
+        due = st.db.read(
+            lambda c: c.execute(
+                f"SELECT * FROM work_items WHERE status IN ({in_list(admitting(Verb.ARCHIVE))}) "
+                "AND archived_at IS NULL AND updated_at <= ?",
+                (cutoff,),
+            ).fetchall()
+        )
+    due = [r for r in due if r["parent_id"] is None]
     archived = []
     for row in due:
         # One row's failure must not skip every later due row until the next
@@ -51,7 +52,45 @@ async def tick(app) -> list[str]:
             logger.exception("auto-archive %s failed", row["id"])
             continue
         archived.append(row["id"])
+    # A slice's child keeps its worktree until its parent has joined it, however
+    # long it has been finished; after the join, or once its parent is archived
+    # (an abandoned or cancelled one, which never joins), it archives at once.
+    for row in st.db.read(_archivable_children):
+        try:
+            await _archive_one(app, row, "auto")
+        except Exception:  # noqa: BLE001
+            logger.exception("auto-archive %s failed", row["id"])
+            continue
+        archived.append(row["id"])
     return archived
+
+
+def _archivable_children(conn) -> list:
+    """Finished children of a generation the parent's group has left behind
+    (joined, or started over), or whose parent is archived: a child is archived with
+    its parent, never alone before the join."""
+    from kraft import store
+
+    rows = conn.execute(
+        f"SELECT * FROM work_items WHERE parent_id IS NOT NULL AND archived_at IS NULL "
+        f"AND status IN ({in_list(admitting(Verb.ARCHIVE))})"
+    ).fetchall()
+    out = []
+    for row in rows:
+        parent = conn.execute(
+            "SELECT archived_at FROM work_items WHERE id = ?", (row["parent_id"],)
+        ).fetchone()
+        state = store.group_state(conn, row["parent_id"])
+        # A generation is finished once the parent is past its join, or has started
+        # over: a rewind to the plan puts the group back to `deciding` (or `prelude`),
+        # with the old generation's children left behind, dropped or joined.
+        finished = state is not None and not (
+            state.phase in ("forked", "joining")
+            and state.generation <= (row["slice_generation"] or 0)
+        )
+        if finished or (parent is not None and parent["archived_at"]):
+            out.append(row)
+    return out
 
 
 def wake(st) -> None:

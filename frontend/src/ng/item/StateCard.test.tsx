@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DiffFile, ItemAction, WorkerSession } from "../../types";
 import { BROKEN_BASE_TEXT, FORGE_ACCOUNT_SSO_HINT, FORGE_ACCOUNT_SSO_UNNAMED_HINT, FORGE_SSO_HINT, hintText } from "./cause";
 import { ComesAfterCard, PausedCard, StateCard, useFolded } from "./StateCard";
-import { acceptWrites, detail, stubFetch, type Call } from "./testkit";
+import { acceptWrites, detail, sliced, stubFetch, type Call } from "./testkit";
 
 /** The writes these pages send; any other write is refused. */
 const WRITES = acceptWrites("POST /work-items/w1/reopen-mr", "POST /work-items/w1/resume", "POST /work-items/w1/retry", "POST /work-items/w1/unblock");
@@ -123,6 +123,16 @@ describe("StateCard", () => {
     expect(h.onEscalate).toHaveBeenCalled();
     await userEvent.click(within(card).getByRole("button", { name: "Open merge request →" }));
     expect(h.onOpenNode).toHaveBeenCalledWith("merge_request");
+  });
+
+  it("failed inside a slice group: Retry names the body node's task and sends its whole path", async () => {
+    const calls = stubFetch(WRITES);
+    const { h } = show(sliced("slices.verification", { display_status: "failed", stop: stop("failed", { node: "slices.verification", task: "slices.verification.run.work" }) }));
+    const card = screen.getByRole("region", { name: "Failed" });
+    expect(card).toHaveTextContent("slices › verification › run › work");
+    await userEvent.click(within(card).getByRole("button", { name: "Retry from work" }));
+    await waitFor(() => expect(h.reload).toHaveBeenCalled());
+    expect(posts(calls)).toEqual([{ method: "POST", path: "/work-items/w1/retry", body: { path: "slices.verification.run.work" } }]);
   });
 
   it("its head folds it to one line, kept across a remount, and a new attempt opens it again", async () => {
@@ -396,6 +406,22 @@ describe("StateCard", () => {
     expect(within(card).queryByRole("button", { name: /Retry/ })).toBeNull();
   });
 
+  it("slices: a parent says its children are the work, with their count, and offers no Retry", () => {
+    // The server shows a parent whose slice needs the person under Needs you, and its own status stays waiting.
+    show({ display_status: "needs_you", status: "waiting", stop: stop("slices"), slices: { done: 2, needs_you: 1, paused: 0, running: 0, queued: 0, dropped: 0, total: 3 } });
+    const card = screen.getByRole("region", { name: "Waiting for slices" });
+    expect(card).toHaveTextContent("slices2 done, 1 needs you");
+    expect(within(card).queryByRole("button", { name: /Retry/ })).toBeNull();
+    // A slice that needs the person is not "nothing needs doing".
+    expect(card).toHaveTextContent("one needs you");
+    expect(card).not.toHaveTextContent("nothing needs doing");
+  });
+
+  it("slices: a parent whose slices all run says nothing needs doing", () => {
+    show({ display_status: "waiting", status: "waiting", stop: stop("slices"), slices: { done: 2, needs_you: 0, paused: 0, running: 1, queued: 0, dropped: 0, total: 3 } });
+    expect(screen.getByRole("region", { name: "Waiting for slices" })).toHaveTextContent("nothing needs doing here");
+  });
+
   it("conflict: the files the handler left and cleared, review and send back", async () => {
     const { h } = show({ display_status: "needs_you", stop: stop("conflict", { facts: { unresolved: ["search/cache.py", "search/reindex.py"], resolved: ["search/config.py"] } }) });
     const card = screen.getByRole("region", { name: "Rebase needs you" });
@@ -508,6 +534,11 @@ describe("PausedCard", () => {
     await userEvent.click(screen.getByRole("button", { name: "Resume with steer" }));
     await waitFor(() => expect(posts(calls)).toHaveLength(2));
     expect(posts(calls).map((c) => c.body)).toEqual([{ steer: null }, { steer: "look at reindex first" }]);
+  });
+
+  it("names a run paused inside a slice group by its body node", () => {
+    render(<PausedCard item={sliced("slices.verification", { display_status: "paused", worker_sessions: [] })} reload={() => {}} />);
+    expect(screen.getByRole("region", { name: "Paused" })).toHaveTextContent("at verification");
   });
 
   it("says when a broken base paused it, and who broke it", async () => {

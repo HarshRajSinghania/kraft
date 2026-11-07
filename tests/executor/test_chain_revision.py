@@ -101,9 +101,10 @@ async def _approve(it):
 async def test_an_unchanged_revision_advances_without_a_human(item_on, tmp_path):
     it = await item_on(_chain(tmp_path, {"rationale": "the chain fits the plan"}))
 
-    assert await _walk(it) == "completed"
+    await _walk(it)  # on to the agent `build`, which this test does not run
 
     assert it.events("gate_requested") == []
+    assert [e["payload"]["gate"] for e in it.events("chain_revision_unchanged")] == [GATE]
     [unchanged] = it.events("chain_revision_unchanged")
     assert unchanged["payload"] == {"gate": GATE, "rationale": "the chain fits the plan"}
     assert [e["payload"] for e in it.events("gate_approved")] == [{"gate": GATE, "by": "kraft"}]
@@ -295,3 +296,95 @@ async def test_a_malformed_revision_is_never_read_as_no_change(item_on, tmp_path
 
     assert [e["payload"]["gate"] for e in it.events("gate_requested")] == [GATE]
     assert it.events("chain_revision_unchanged") == []
+
+
+SLICED_PLAN = """## Slices
+
+- **Slice 1: A.** Task 1.
+- **Slice 2: B.** Task 2.
+
+### Task 1: a
+### Task 2: b
+"""
+
+
+def _sliceable(tmp_path: Path, change: dict) -> list[dict]:
+    """`_chain` with a `build` the rules take as the implementing node."""
+    nodes = _chain(tmp_path, change)
+    nodes[2] = v1_node("build", tasks=[v1_task("run", kind="agent", prompt="build it")])
+    return nodes
+
+
+async def _sliced_item(item_on, tmp_path, change, plan=SLICED_PLAN):
+    it = await item_on(
+        _sliceable(tmp_path, change),
+        attachments=[{"kind": "plan", "path": "plan.md"}],
+        worktree=True,
+    )
+    (it.worktree / "plan.md").write_text(plan)
+    return it
+
+
+async def test_a_plan_with_slices_makes_the_revision_gate_ask(item_on, tmp_path):
+    it = await _sliced_item(item_on, tmp_path, {"rationale": "the chain fits the plan"})
+
+    assert await _walk(it) == "awaiting_gate"
+
+    assert [e["payload"]["gate"] for e in it.events("gate_requested")] == [GATE]
+    assert it.events("chain_revision_unchanged") == []
+
+
+async def _revised_again(it, plan: str) -> None:
+    """After a fork of generation 1 joined, a rewind to the plan: the plan as it
+    now stands, and the revision gate asking again."""
+    from kraft import events
+    from kraft.vocab import GateEvent
+
+    (it.worktree / "plan.md").write_text(plan)
+    joined = store.GroupState(group="slices", phase="joined", generation=1)
+
+    def rewind(c):
+        store.set_group_state(c, it.id, joined)
+        events.append(c, it.id, GateEvent.REQUESTED, {"gate": GATE})
+
+    await it.database.write(rewind)
+
+
+@pytest.mark.parametrize(
+    ("again", "chain", "body", "generation"),
+    [
+        pytest.param(None, ["revise", GATE, "slices", "brief"], ["build", "brief"], 0, id="first"),
+        # A rewind to the plan rebuilds the group from the plan as it stands,
+        # and its next entry forks generation 2.
+        pytest.param(
+            SLICED_PLAN, ["revise", GATE, "slices", "brief"], ["build", "brief"], 1, id="rebuilt"
+        ),
+        pytest.param("### Task 1: a\n", ["revise", GATE, "build", "brief"], [], 1, id="left-out"),
+    ],
+)
+async def test_approving_a_sliced_revision_gives_the_run_chain_a_group(
+    item_on, tmp_path, again, chain, body, generation
+):
+    it = await _sliced_item(item_on, tmp_path, {"rationale": "the chain fits the plan"})
+    await _walk(it)
+    nodes = await _approve(it)
+    if again is not None:
+        await _revised_again(it, again)
+        nodes = await _approve(it)
+
+    assert [n.id for n in nodes] == chain
+    assert [n.id for n in nodes[2].body] == [f"slices.{n}" for n in body]
+    state = it.database.read(lambda c: store.group_state(c, it.id))
+    assert (state.group, state.phase, state.generation) == ("slices", "deciding", generation)
+    assert not store.group_unjoined(it.row())
+
+
+async def test_a_plan_without_slices_still_advances_without_a_human(item_on, tmp_path):
+    it = await _sliced_item(
+        item_on, tmp_path, {"rationale": "the chain fits the plan"}, plan="### Task 1: a\n"
+    )
+
+    await _walk(it)  # on to the agent `build`, which this test does not run
+
+    assert it.events("gate_requested") == []
+    assert [e["payload"]["gate"] for e in it.events("chain_revision_unchanged")] == [GATE]

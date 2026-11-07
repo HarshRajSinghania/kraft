@@ -278,6 +278,10 @@ def _build_old_db(conn, version, *, drop_lines=(), skip_stmts=(), replace=()):
         drop_lines = (*drop_lines, "one_off_chain", "one_off_approval", "one_off_pending")
     if version < 59:
         drop_lines = (*drop_lines, "forge_pins", "-- {mount: {account, backend}}")
+    if version < 60:
+        drop_lines = (*drop_lines, "slice", "parent_id", "docs_commit", "pinned_head")
+        drop_lines = (*drop_lines, "group_state", "paused_by_parent", "while a child")
+        skip_stmts = (*skip_stmts, "idx_work_items_slice")
     if version < 56:
         old = "                    'waiting', 'conflict', 'infra', 'infra_stop')),"
         replace = (*replace, ("'infra_stop', 'merge_rejected')),", old))
@@ -592,6 +596,10 @@ ADDED_COLUMNS = [
     (57, "work_items", ("one_off_pending",), 0),
     # NULL: an item that started before pins has none, and pins at its next forge node
     (58, "work_items", ("forge_pins",), None),
+    # NULL and 0: a row written before slice groups is no parent's child, and paused by no one
+    (59, "work_items", ("parent_id", "slice_generation", "slice_key", "group_state"), None),
+    (59, "work_items", ("docs_commit", "pinned_head"), None),
+    (59, "work_items", ("paused_by_parent",), 0),
 ]
 
 

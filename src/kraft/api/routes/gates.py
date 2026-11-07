@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
-from kraft import events, executor, inplace, reviewed_head, store, when_free
+from kraft import events, executor, inplace, reviewed_head, slices, store, when_free
 from kraft.api import api_router, deps
 from kraft.api.routes import artifacts, board
 from kraft.api.routes.lifecycle import (
@@ -17,7 +17,7 @@ from kraft.api.routes.lifecycle import (
 )
 from kraft.config import git_read
 from kraft.executor import stops
-from kraft.templates import revision
+from kraft.templates import revision, slicing
 from kraft.templates.models import ForgeAction, ForgeTask, GateNode
 from kraft.vocab import ChainEvent, GateEvent, StopKind
 
@@ -137,7 +137,12 @@ async def _revise(st, row, gate: str, *, viewer: bool, seen: str | None) -> str 
         return f"{gate}: the chain revision could not be read"
     chain = executor.chain_of(row)
     try:
-        changes = revision.parse(read[0])
+        changes = slicing.with_slicing(
+            revision.parse(read[0]),
+            chain,
+            slices.slicing_input(st.run_dirs, row, deps.max_slices(st)),
+            at=gate,
+        )
         revised = revision.revise(
             chain,
             changes,
@@ -179,10 +184,22 @@ async def _revise(st, row, gate: str, *, viewer: bool, seen: str | None) -> str 
         "diff": revision.diff(chain.chain, revised.chain),
     }
     seen = (row["materialized_chain"], row["run_chain"])
+
+    def apply(c):
+        store.revise_chain(c, row["id"], revised.to_json(), payload, seen=seen)
+        if changes.slice is not None or changes.unslice is not None:
+            # A revision that adds a group, or takes one out, starts it over: the
+            # next entry decides again and forks the next generation
+            # (`executor.slices`); a group left out leaves nothing unjoined.
+            prior = store.group_state(c, row["id"])
+            generation = prior.generation if prior is not None else 0
+            group = changes.slice.group if changes.slice is not None else changes.unslice
+            store.set_group_state(
+                c, row["id"], store.GroupState(group=group, generation=generation)
+            )
+
     try:
-        await st.db.write(
-            lambda c: store.revise_chain(c, row["id"], revised.to_json(), payload, seen=seen)
-        )
+        await st.db.write(apply)
     except ValueError as exc:
         return f"{gate}: {exc}"
     return None

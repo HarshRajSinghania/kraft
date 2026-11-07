@@ -10,6 +10,7 @@ import os
 
 import pytest
 from pydantic import ValidationError
+from support.frozen import v1_frozen
 from support.harness import write
 
 from kraft import item_paths, progress
@@ -139,6 +140,26 @@ def test_combine_clamps_current_off_a_done_marked_task():
     p = progress.combine(tasks, reported=0, committed=6)
     assert p.current == 6
     assert p.title == "a"
+
+
+@pytest.mark.parametrize(
+    ("tasks", "reported", "committed", "current"),
+    [
+        pytest.param(
+            [("a", True), ("b", True), ("c", False)], 0, 0, 3, id="leading-done-steps-forward"
+        ),
+        pytest.param(
+            [("a", True), ("b", False), ("c", True), ("d", False)],
+            0,
+            2,
+            4,
+            id="done-in-the-middle-steps-forward",
+        ),
+        pytest.param([("a", False)] * 6 + [("g", True)] * 4, 0, 6, 6, id="trailing-done-unchanged"),
+    ],
+)
+def test_combine_steps_over_done_tasks(tasks, reported, committed, current):
+    assert progress.combine(tasks, reported=reported, committed=committed).current == current
 
 
 def test_combine_marks_a_done_task_done_regardless_of_position():
@@ -398,3 +419,39 @@ async def test_for_detail_follows_the_implementing_node_past_its_run(
     assert [t.state for t in p.tasks] == states
     assert (p.current, p.total) == (current, 3)
     assert [t.sha for t in p.tasks] == [named, None, None]
+
+
+def test_the_implementing_node_is_found_inside_a_group():
+    chain = v1_frozen(
+        [
+            {
+                "id": "slices",
+                "kind": "group",
+                "nodes": [
+                    {
+                        "id": "implementation",
+                        "kind": "exec",
+                        "tasks": [
+                            {"id": "run", "kind": "agent", "harness": "claude", "prompt": "p"}
+                        ],
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert progress.implementing_nodes(chain) == ["slices.implementation"]
+
+
+def test_a_rejection_back_to_a_group_is_rework():
+    """A forked parent never ran the implementing node itself: the group's own
+    completion and re-entry stand for it."""
+    evs = [
+        _ev("node_started", "slices"),
+        _ev("node_completed", "slices"),
+        _ev("node_started", "work_brief"),
+        _ev("gate_rejected"),
+        _ev("node_started", "slices"),
+        _ev("node_started", "slices.implementation"),
+    ]
+    assert progress.is_rework(evs, "slices.implementation")

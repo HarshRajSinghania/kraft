@@ -57,6 +57,21 @@ _COMMIT_TASK = re.compile(r"\btask\s+(\d+(?:\s*[+,&]\s*\d+)*)", re.IGNORECASE)
 _FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 
 
+def unfenced_lines(text: str) -> list[str]:
+    """`text` split into lines, with every line of (and the fences around) a
+    fenced ```/~~~ code block blanked. Keeps the line count, so an index into
+    the result is an index into the text's own lines."""
+    in_fence = False
+    lines = []
+    for line in text.split("\n"):
+        if _FENCE.match(line):
+            in_fence = not in_fence
+            lines.append("")
+        else:
+            lines.append("" if in_fence else line)
+    return lines
+
+
 def parse_tasks(text: str) -> list[tuple[str, bool]]:
     """The `(title, done)` pairs of a plan's `## Task N` / `### Task N`
     headings, in order. `done` is True iff the title ends with the exact
@@ -67,15 +82,7 @@ def parse_tasks(text: str) -> list[tuple[str, bool]]:
     that quotes a `## Task N` heading in an example or test fixture (Kraft-szad)
     would otherwise count as a real one.
     """
-    in_fence = False
-    lines = []
-    for line in text.split("\n"):
-        if _FENCE.match(line):
-            in_fence = not in_fence
-            lines.append("")
-        else:
-            lines.append("" if in_fence else line)
-    titles = [m[1].strip() for m in _TASK_HEADING.finditer("\n".join(lines))]
+    titles = [m[1].strip() for m in _TASK_HEADING.finditer("\n".join(unfenced_lines(text)))]
     result = []
     for title in titles:
         done = title.endswith("[DONE]")
@@ -99,13 +106,16 @@ def committed_task(subjects: list[str]) -> int:
 def combine(tasks: list[tuple[str, bool]], reported: int, committed: int) -> ProgressReport | None:
     """A report means "starting task K"; a commit naming K means K is done, so
     the one after it is current -- unless that lands on a task the plan
-    itself marks `[DONE]` (already merged outside this work item), in which
-    case `current` walks back to the last task that isn't. Capped at the
-    last task."""
+    itself marks `[DONE]` (already merged outside this work item, or built
+    by another slice), in which case `current` steps forward to the first
+    task that isn't, and when none is left ahead, back to the last one that
+    isn't. Capped at the last task."""
     if not tasks:
         return None
     total = len(tasks)
     current = min(total, max(reported, committed + 1))
+    while current < total and tasks[current - 1][1]:
+        current += 1
     while current > 1 and tasks[current - 1][1]:
         current -= 1
     return ProgressReport(
@@ -148,9 +158,11 @@ def implementing_nodes(chain) -> list[str]:
     library this is `implementation` alone."""
     from kraft.templates.models import AgentTask
 
+    # A group's body is looked into: its nodes are `group.node`.
     return [
         node.id
-        for node in chain.nodes
+        for top in chain.nodes
+        for node in (*top.body, top)
         if any(
             isinstance(t.task, AgentTask) and t.task.skill is None
             for step in node.steps
@@ -192,15 +204,17 @@ def active_implementation_node(row) -> str | None:
     return None
 
 
-def read_tasks(run_dirs, row, worktree: Path, *, in_place: bool = False) -> list[tuple[str, bool]]:
-    """The attached plan's tasks if there is one, else the plan node's
+def read_attached(
+    run_dirs, row, worktree: Path, kind: str, *, in_place: bool = False
+) -> str | None:
+    """The attached `kind`'s text if there is one, else the `kind` node's
     document's (`item_paths.document`, the new place first). Never through a
     link, and never blocking on a FIFO: a worker can plant either in its
     worktree or its item's `docs/`. `in_place`: the checkout may be on another
     branch, or hold the person's copy, so the plan is the one committed on the
     item's branch, else the copy filed at intake (`Indexer._read_attachment`)."""
     attachments = json.loads(row["attachments"] or "[]")
-    plan = next((a for a in attachments if a.get("kind") == "plan"), None)
+    plan = next((a for a in attachments if a.get("kind") == kind), None)
     rel = plan["path"] if plan else None
     if rel is not None and in_place:
         text = git_read(
@@ -214,12 +228,23 @@ def read_tasks(run_dirs, row, worktree: Path, *, in_place: bool = False) -> list
         read, _reason = read_worktree_file(Path(worktree), rel, item_paths.DOC_MAX_BYTES)
         text = read.text if read is not None else None
     else:
-        name = item_paths.document(run_dirs, row["id"], "plan", worktree=worktree)
+        name = item_paths.document(run_dirs, row["id"], kind, worktree=worktree)
         text = (
             item_paths.read_document(run_dirs, row["id"], name, worktree=worktree)
             if name is not None
             else None
         )
+    return text
+
+
+def read_plan(run_dirs, row, worktree: Path, *, in_place: bool = False) -> str | None:
+    """`read_attached` for the plan."""
+    return read_attached(run_dirs, row, worktree, "plan", in_place=in_place)
+
+
+def read_tasks(run_dirs, row, worktree: Path, *, in_place: bool = False) -> list[tuple[str, bool]]:
+    """The tasks of `read_plan`'s text."""
+    text = read_plan(run_dirs, row, worktree, in_place=in_place)
     return parse_tasks(text) if text is not None else []
 
 
@@ -266,11 +291,14 @@ def is_rework(evs: list[dict], node_id: str) -> bool:
     plan. A rejection that re-entered at the plan node or earlier is not
     rework: the plan may have been rewritten, and this run follows it again.
     """
+    # Inside a group the node stands at the group: a forked parent never ran it,
+    # so the group's own completion and re-entry stand for it.
+    ids = {node_id, node_id.rpartition(".")[0]} - {""}
     done = max(
         (
             i
             for i, e in enumerate(evs)
-            if e["type"] == ChainEvent.NODE_COMPLETED and e["payload"].get("node_id") == node_id
+            if e["type"] == ChainEvent.NODE_COMPLETED and e["payload"].get("node_id") in ids
         ),
         default=None,
     )
@@ -289,7 +317,7 @@ def is_rework(evs: list[dict], node_id: str) -> bool:
         ),
         None,
     )
-    return first == node_id
+    return first in ids
 
 
 def rework_run(db, row) -> bool:

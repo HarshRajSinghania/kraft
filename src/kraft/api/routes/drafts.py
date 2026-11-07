@@ -562,9 +562,17 @@ async def apply_item_draft(wid: str, request: Request):
             chain, row["current_node_id"], draft["ops"], library, deps.item_repo_id(st, row)
         )
         if evaluated.passed:
+            # A parent at a group whose slices are running stands at the group:
+            # an op at or behind it would move the cursor back, which the slices
+            # forbid until they are joined.
+            unjoined = (
+                "; its slices have not ended, so nothing at or behind the group can change"
+                if items.group_unjoined(row)
+                else ""
+            )
             return 409, {
                 "detail": "the item has moved past some of this draft's ops; remove them or "
-                "move them after the current node",
+                f"move them after the current node{unjoined}",
                 "passed": evaluated.passed,
             }
         if evaluated.problems:

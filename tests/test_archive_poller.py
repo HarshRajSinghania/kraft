@@ -178,3 +178,60 @@ async def test_an_item_is_archived_once_when_two_callers_race(tmp_path, repo, st
         ).fetchone()
     )
     assert events["n"] == 1
+
+
+async def _child_of_a_group(app, repo, phase: str, parent_archived: bool = False):
+    """A completed child `w1` whose parent `p1` is at `phase`, finished long ago."""
+    worktree = await seed_completed_item(app, repo, updated_at=days_ago(90))
+
+    def _link(c):
+        store.create_work_item(
+            c,
+            id="p1",
+            bead_id=None,
+            title="parent",
+            repo=str(repo),
+            chain_template="quick-task",
+            chain_definition="{}",
+        )
+        store.set_group_state(c, "p1", store.GroupState(group="slices", phase=phase, generation=1))
+        c.execute(
+            "UPDATE work_items SET parent_id = 'p1', slice_generation = 1, slice_key = 1 "
+            "WHERE id = 'w1'"
+        )
+        if parent_archived:
+            c.execute(
+                "UPDATE work_items SET archived_at = ?, archived_by = 'auto' WHERE id='p1'",
+                (days_ago(1),),
+            )
+
+    await app.state.db.write(_link)
+    return worktree
+
+
+@pytest.mark.parametrize(
+    ("phase", "parent_archived", "archived"),
+    [
+        pytest.param("forked", False, False, id="before-the-join"),
+        pytest.param("joining", False, False, id="while-joining"),
+        pytest.param("joined", False, True, id="after-the-join"),
+        # A rewind to the plan starts the group over: this generation's children,
+        # dropped or joined, are finished whether or not a new fork follows.
+        pytest.param("deciding", False, True, id="after-a-rebuild-that-left-the-group-out"),
+        pytest.param("prelude", False, True, id="while-a-new-generation-prepares"),
+        # An abandoned or cancelled parent never joins: its slices go with it.
+        pytest.param("forked", True, True, id="with-an-archived-parent"),
+    ],
+)
+async def test_a_slices_child_is_archived_only_after_its_parent_joined(
+    tmp_path, repo, stub_app, phase, parent_archived, archived
+):
+    """A child that ends early keeps its worktree until the join, however old;
+    after it, it archives at once, with no `archive_after_days` to wait for."""
+    app = stub_app(**_state(tmp_path, archive_after_days=30))
+    worktree = await _child_of_a_group(app, repo, phase, parent_archived)
+
+    result = await archive.tick(app)
+
+    assert (result == ["w1"]) is archived
+    assert worktree.exists() is not archived

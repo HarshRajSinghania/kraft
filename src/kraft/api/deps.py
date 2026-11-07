@@ -385,8 +385,9 @@ def forbid_self_action(st, request, wid: str, *, escalation_may: bool = True) ->
     worker's retry of its own item while its escalation's self-retry passes,
     since the channel does not tell the two apart (Kraft-9efnk.14).
     """
+    family = st.db.read(lambda c: store.family_ids(c, wid))
     for session in caller_sessions(st, request):
-        if session["work_item_id"] == wid and (
+        if session["work_item_id"] in family and (
             not escalation_may or session["hook_point"] != executor.ESCALATION_HOOK
         ):
             raise HTTPException(
@@ -1279,6 +1280,11 @@ class _PoisonedRepoEntry:
         raise self._exc
 
 
+def max_slices(st) -> int:
+    """`max_slices` of the live policy: how many slices a plan may declare."""
+    return getattr(getattr(st, "policy", None), "max_slices", 6)
+
+
 def library_steering(st) -> dict[str, str] | None:
     """The loaded library's steering profiles, name to instructions; `None`
     when no library loaded."""
@@ -1357,6 +1363,7 @@ def launch(st, repo: str) -> executor.LaunchContext:
     outputs_max_bytes = getattr(
         getattr(st, "policy", None), "outputs_max_bytes", DEFAULT_OUTPUTS_MAX_BYTES
     )
+    max_slices = globals()["max_slices"](st)
     try:
         repos = config_mod.load_repos(repos_path(st))
     except config_mod.ConfigError as exc:
@@ -1371,6 +1378,8 @@ def launch(st, repo: str) -> executor.LaunchContext:
             chain_revision_digest=digest,
             forges=functools.partial(forges_now, st),
             outputs_max_bytes=outputs_max_bytes,
+            max_slices=max_slices,
+            slice_room=functools.partial(storage.room_for, st),
         )
     entry = _connected(repos, repo)
     repo_id = entry.id if entry is not None else None
@@ -1383,4 +1392,6 @@ def launch(st, repo: str) -> executor.LaunchContext:
         item_repo_id=repo_id,
         forges=functools.partial(forges_now, st),
         outputs_max_bytes=outputs_max_bytes,
+        max_slices=max_slices,
+        slice_room=functools.partial(storage.room_for, st),
     )

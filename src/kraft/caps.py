@@ -526,15 +526,18 @@ def budget_breach(conn, row, path: str) -> TokenBreach | UsdBreach | None:
         "",
         *(p for i in range(1, len(segments) + 1) if (p := ".".join(segments[:i])) in kinds),
     ]
+    # The item-wide cap covers the whole family of a sliced item: the parent's and
+    # every child's spend. A scope inside a node is the item's own.
+    family = store.family_ids(conn, row["id"])
     sessions = [
         {
             **dict(s),
             "hook_point": s["node_id"] if s["hook_point"] == "escalation" else s["hook_point"],
         }
         for s in conn.execute(
-            f"SELECT node_id, hook_point, status, {', '.join(_usage.KINDS)}, cost_usd "
-            "FROM worker_sessions WHERE work_item_id = ?",
-            (row["id"],),
+            f"SELECT work_item_id, node_id, hook_point, status, {', '.join(_usage.KINDS)}, "
+            f"cost_usd FROM worker_sessions WHERE work_item_id IN ({', '.join('?' * len(family))})",
+            family,
         ).fetchall()
     ]
     above = dict.fromkeys(BUDGET_FIELDS)
@@ -543,7 +546,11 @@ def budget_breach(conn, row, path: str) -> TokenBreach | UsdBreach | None:
         under = [
             s
             for s in sessions
-            if not level or s["hook_point"] == level or s["hook_point"].startswith(level + ".")
+            if not level
+            or (
+                s["work_item_id"] == row["id"]
+                and (s["hook_point"] == level or s["hook_point"].startswith(level + "."))
+            )
         ]
         for name in BUDGET_FIELDS:
             cap = getattr(policy, name)
@@ -606,11 +613,13 @@ def time_capped_sessions(conn, work_item_ids) -> set[tuple[str, str]]:
 _GATE_SETTLED = (*GATE_CLOSED, LimitEvent.TIME_CAP_REACHED)
 
 
-async def tick(db, *, now: str | None = None) -> list[str]:
+async def tick(db, *, now: str | None = None, cancel=None) -> list[str]:
     """Stop, for a human, every parked item whose cap ran out while nothing
     of it ran: waiting on an external condition, rate limited, or at a gate
     -- a gate's own `timeout` included. Once per park: a gate stays pending
-    and answerable, so one stop per request. Returns the items stopped."""
+    and answerable, so one stop per request. Returns the items stopped. `cancel`
+    ends a walk task by item id (`deps.cancel` of the app the poller serves):
+    the slices of a parent it stops are paused with theirs ended."""
     marks = ", ".join("?" * len(_GATE_SETTLED))
     rows = db.read(
         lambda c: c.execute(
@@ -637,6 +646,55 @@ async def tick(db, *, now: str | None = None) -> list[str]:
 
         if await db.write(lambda c, r=row, h=hit: stop_if_still_parked(c, r, h)):
             stopped.append(row["id"])
+            await _pause_slices(db, row, "time cap", cancel)
+    return stopped
+
+
+async def _pause_slices(db, row, by: str, cancel=None) -> None:
+    """A parent stopped while its slices are unjoined stops its children with it;
+    its retry wakes them again (`executor.slices.pause_family`)."""
+    if store.group_unjoined(row):
+        from kraft.executor import slices  # deferred: executor imports this module
+
+        await slices.pause_family(db, row["id"], by=by, cancel=cancel)
+
+
+async def family_tick(db, policy=None, *, cancel=None) -> list[str]:
+    """Stop, for a person, every parent waiting on its slices whose family has
+    spent past its cap: a launch-time check cannot see spend that started
+    together (Kraft-ib2sn), so this one runs on a clock. Pauses the children. The
+    parent's own `budget_usd` / `token_budget` and the policy's work-item cap are
+    the family's, summed over the parent and every child."""
+    from kraft.executor import stops  # deferred: executor imports this module
+    from kraft.policy import NO_BUDGET
+
+    rows = db.read(
+        lambda c: c.execute(
+            "SELECT * FROM work_items WHERE status = 'waiting' AND group_state IS NOT NULL"
+        ).fetchall()
+    )
+    stopped = []
+    for row in rows:
+        if not store.group_unjoined(row):
+            continue
+        budget = store.effective_budget(row, policy.budget if policy else NO_BUDGET)
+        breach = stops.budget_breach(db, row["id"], budget, row=row, path="")
+        if breach is None:
+            continue
+        await db.write(
+            lambda c, r=row, b=breach: store.mark_needs_human(
+                c,
+                r["id"],
+                r["current_node_id"],
+                stops.budget_reason(b),
+                None,
+                b.model_dump(),
+                kind=StopKind.BUDGET,
+                limit=stops.budget_limit(b),
+            )
+        )
+        await _pause_slices(db, row, "family budget", cancel)
+        stopped.append(row["id"])
     return stopped
 
 
@@ -669,12 +727,24 @@ def stop_if_still_parked(conn, seen, hit: Hit) -> bool:
     return True
 
 
+def _walk_canceller(app):
+    """`deps.cancel` for `app`, as the pause door bounds it."""
+    from kraft.api import deps  # deferred: kraft.api imports this module
+
+    async def cancel(wid: str) -> None:
+        await deps.cancel(app, wid, timeout=deps.CANCEL_TIMEOUT)
+
+    return cancel
+
+
 async def poller(app) -> None:
     """`tick` on a fixed interval until cancelled."""
     while True:
         await asyncio.sleep(_INTERVAL_S)
         try:
-            await tick(app.state.db)
+            cancel = _walk_canceller(app)
+            await tick(app.state.db, cancel=cancel)
+            await family_tick(app.state.db, app.state.policy, cancel=cancel)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 -- a bad tick must not end the poller

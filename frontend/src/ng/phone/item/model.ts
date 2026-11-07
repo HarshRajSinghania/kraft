@@ -10,8 +10,8 @@ import { limitPolicy } from "../../item/limitPolicy";
 import type { ItemDetail } from "../../item/useItem";
 import type { ChainNode } from "../../graph/layout";
 import { steerDoor } from "./steer";
-import { CHECKOUT_FREES, gateName, IN_USE_BY, nameOf, WAITING_FOR_CHECKOUT } from "../../board/rowText";
-import { LIMIT_REACHED, CHECK_REPO_SETTINGS, MR_SYNC_STOPPED, MARK_COMPLETE, REBASE_NEEDS_YOU, REVIEW_THE_CONFLICTS, BUDGET_RAN_OUT, WAITING_ON_THE_PROVIDER, waitTitle, REMOVE_FROM_QUEUE, ABANDONED, ABANDONED_TEXT, NO_REASON_GIVEN } from "../../item/sharedWords";
+import { CHECKOUT_FREES, gateName, IN_USE_BY, nameOf, slicesLine, WAITING_FOR_CHECKOUT } from "../../board/rowText";
+import { LIMIT_REACHED, CHECK_REPO_SETTINGS, MR_SYNC_STOPPED, MARK_COMPLETE, REBASE_NEEDS_YOU, REVIEW_THE_CONFLICTS, BUDGET_RAN_OUT, WAITING_ON_THE_PROVIDER, WAITING_FOR_SLICES, slicesWaitText, waitTitle, REMOVE_FROM_QUEUE, ABANDONED, ABANDONED_TEXT, NO_REASON_GIVEN } from "../../item/sharedWords";
 
 /** The item screen's decisions, pure (W17 brief C): what the state card says,
  *  which pair of buttons the bottom bar offers, what the ⋮ sheet lists, and the
@@ -71,6 +71,8 @@ export function cardOf(item: ItemDetail, events: KraftEvent[] = [], fileCount: n
   const stop = item.stop;
   const facts = (stop?.facts ?? {}) as Record<string, unknown>;
   const where = stop ? [pathOf(stop.task) || (stop.node && nameOf(item.chain_definition.nodes, stop.node)), stop.attempt ? `attempt ${stop.attempt}` : ""].filter(Boolean).join(" · ") : undefined;
+  // Waiting on its slices, shown as waiting or, when a slice needs the person, as Needs you.
+  if (stop?.kind === "slices" && item.status === "waiting") return { tone: "info", title: WAITING_FOR_SLICES, where, text: slicesWaitText(item.slices?.needs_you), facts: item.slices ? [["slices", slicesLine(item).replace(/^slices: /, "")]] : [] };
   switch (item.display_status) {
     case "failed": {
       if (!stop) return null;
@@ -278,7 +280,7 @@ export function nodeSub(n: ChainNode, skipped = false): { text: string; tone: "w
       if (n.paused) return { text: "paused", tone: "muted" };
       if (n.sub === "needs you") return { text: gate ? "waiting for you" : "needs you", tone: "warn" };
       // A waiting node says what it waits on, as the badge does, not "running" (R11b-04).
-      return { text: [n.wait ?? "running", n.sub].filter(Boolean).join(" · "), tone: "info" };
+      return { text: [n.wait ?? "running", n.summary, n.sub].filter(Boolean).join(" · "), tone: "info" };
     case "plain": return { text: n.meta ?? "", tone: "muted" };
     default: return { text: gate ? "you" : "not started", tone: "muted" };
   }

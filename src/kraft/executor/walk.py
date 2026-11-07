@@ -51,6 +51,7 @@ from kraft.templates.models import (
     ForgeAction,
     ForgeTask,
     GateNode,
+    GroupNode,
     MaterializedChain,
     ResolvedNode,
     ResolvedTask,
@@ -2897,7 +2898,11 @@ def _cursor(row, nodes) -> tuple[int, int]:
     current = row["current_node_id"]
     if current is None:
         return 0, 0
-    index = next((i for i, n in enumerate(nodes) if n.id == current), None)
+    # A group's body node (`group.node`) stands at the group.
+    index = next(
+        (i for i, n in enumerate(nodes) if n.id == current or current.startswith(f"{n.id}.")),
+        None,
+    )
     if index is None:
         raise LookupError(
             f"work item {row['id']!r} stands on node {current!r}, which its chain does not have"
@@ -3265,7 +3270,7 @@ async def run_once(
             step, preserve = 0, frozenset()
             continue
 
-        if await gates.maybe_gate(db, work_item_id, nodes, i, run_dirs):
+        if await gates.maybe_gate(db, work_item_id, nodes, i, run_dirs, policy):
             await _report_if_undelivered(db, work_item_id, carried)
             # Nothing unanswered is a must-fix at this point, unless the
             # reject cap stopped the bounce above -- either way, the reply
@@ -3284,21 +3289,37 @@ async def run_once(
             continue
         base_change = node.node.on_base_changed if isinstance(node.node, ExecNode) else None
         pre_base = dispatch._current_base_ref(db, work_item_id) if base_change else None
-        result = await walk_node(
-            db,
-            run_dirs,
-            work_item_id,
-            node,
-            row,
-            worktree,
-            policy=policy,
-            # `carried` empties itself on the first agent launch, so the note reaches
-            # the next agent to run and no later one
-            steer=carried,
-            launch=launch,
-            start_step=step,
-            preserve=preserve,
-        )
+        if isinstance(node.node, GroupNode):
+            from kraft.executor import slices
+
+            result = await slices.walk_group(
+                db,
+                run_dirs,
+                work_item_id,
+                node,
+                row,
+                worktree,
+                policy=policy,
+                steer=carried,
+                launch=launch,
+                start_step=step,
+            )
+        else:
+            result = await walk_node(
+                db,
+                run_dirs,
+                work_item_id,
+                node,
+                row,
+                worktree,
+                policy=policy,
+                # `carried` empties itself on the first agent launch, so the note reaches
+                # the next agent to run and no later one
+                steer=carried,
+                launch=launch,
+                start_step=step,
+                preserve=preserve,
+            )
         step = 0  # only the entry node resumes mid-way
         preserve = frozenset()
         if result in ("paused", "needs_human", RATE_LIMITED, WAITING):
@@ -3421,6 +3442,12 @@ async def run_once(
     # taking `carried` -- e.g. every remaining node was builtin/subprocess
     # only. Report it the same as every other exit (Kraft-s7c04.50).
     await _report_if_undelivered(db, work_item_id, carried)
+    if store.is_child(row):
+        # What the join replays: the commit the child's review saw, not whatever
+        # its branch is later moved to.
+        head = _config.git_read(Path(worktree), "rev-parse", "HEAD")
+        if head:
+            await db.write(lambda c: store.pin_head(c, work_item_id, head))
     await db.write(lambda c: store.mark_completed(c, work_item_id))
     await entry.close_beads(db, row, bd_cwd, run_dirs)
     return "completed"

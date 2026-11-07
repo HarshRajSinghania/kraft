@@ -602,6 +602,9 @@ def set_policy_override(conn: sqlite3.Connection, work_item_id: str, override) -
     events.append(
         conn, work_item_id, SettingsEvent.POLICY_OVERRIDE_CHANGED, {"policy": stored or {}}
     )
+    from kraft.store.slices import share_cap  # deferred: it imports this package
+
+    share_cap(conn, work_item_id)  # a parent's slices share its caps
 
 
 def chain_node_ids(row) -> tuple[str, ...]:
@@ -654,7 +657,10 @@ def node_index(row, node_id, *, default=None):
     a node).
     """
     ids = chain_node_ids(row)
-    return ids.index(node_id) if node_id in ids else default
+    if node_id in ids:
+        return ids.index(node_id)
+    # A group's body node (`group.node`) stands at the group.
+    return next((i for i, n in enumerate(ids) if node_id and node_id.startswith(f"{n}.")), default)
 
 
 def gate_node_index(row, gate: str, *, default=None):
@@ -734,9 +740,14 @@ def node_view(node) -> dict:
     # the fix loop, the judge and a gate's reviewer -- which the Config tab
     # would then render as though they were ordinary work.
     steps = [[task.path for task in step.tasks] for step in node.steps]
+    group = node.node if node.body else None
     return {
         "id": node.id,
         "kind": node.node.kind.value,
+        # A slice group's body, as nodes of their own (`group.node` ids): the SPA
+        # draws the group as one glyph that opens to these.
+        "nodes": [node_view(inner) for inner in node.body] if group is not None else None,
+        "unforked": group.unforked_ids() if group is not None else None,
         # Canonical task paths, which is what a V1 node has instead of a list of
         # hook-point names. Empty on a gate, which declares no execution shape.
         "tasks": [path for group in steps for path in group],

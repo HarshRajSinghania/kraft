@@ -180,7 +180,11 @@ def _current_stop(st, wid: str) -> dict | None:
 
 
 def display_status(
-    row, stop_kind: str | None, escalated: bool, pending_gate: str | None
+    row,
+    stop_kind: str | None,
+    escalated: bool,
+    pending_gate: str | None,
+    slices: dict | None = None,
 ) -> DisplayStatus:
     """The design vocabulary's status badge (Kraft Design Decisions §1, §14):
     exactly one of `archived`, `done`, `cancelled`, `paused`, `running`,
@@ -196,9 +200,15 @@ def display_status(
     or cannot run for them (Item States requirement 1). A `stuck` stop still
     counts as `needs_you` until its escalation turn actually starts, at which
     point `escalated` takes over.
+
+    `slices` is the parent's `slices_summary`: a slice that needs a person
+    puts its parent under Needs you, whatever the parent's own status. The
+    list and the detail both pass it, so they show the same badge.
     """
     if row["archived_at"] is not None:
         return DisplayStatus.ARCHIVED
+    if slices and slices["needs_you"]:
+        return DisplayStatus.NEEDS_YOU
     shown = TRAITS[WorkItemStatus(row["status"])].display
     if shown is not None:
         return shown
@@ -305,7 +315,12 @@ def item_actions(
         status,
         archived=row["archived_at"] is not None,
         started=row["current_node_id"] is not None,
-        on_chain=chain is not None and row["current_node_id"] in {n.id for n in chain.chain.nodes},
+        on_chain=chain is not None
+        and row["current_node_id"] is not None
+        and any(
+            row["current_node_id"] == n.id or row["current_node_id"].startswith(f"{n.id}.")
+            for n in chain.chain.nodes
+        ),
         skippable=chain is not None
         and status in admitting(Verb.SKIP)
         and next_skippable_node(row, pending_gate, chain) is not None,
@@ -321,6 +336,7 @@ def item_actions(
         dead_dependency=dead_dependency,
         must_fix_open=must_fix_open,
         chainless=asks and chain is None,
+        group_unjoined=store.group_unjoined(row),
     )
     return [str(a) for a in open_doors(facts)]
 
@@ -353,7 +369,7 @@ async def list_work_items(request: Request):
     def _read(c):
         rows = c.execute(
             f"SELECT *, {store.ONE_OFF_SUMMARY_COLUMNS} FROM work_items WHERE (? OR status != ?) "
-            "AND (archived_at IS NOT NULL) = ? ORDER BY created_at",
+            "AND (archived_at IS NOT NULL) = ? AND parent_id IS NULL ORDER BY created_at",
             (include_abandoned, WorkItemStatus.ABANDONED, archived),
         ).fetchall()
         cursor = c.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
@@ -441,6 +457,21 @@ async def list_work_items(request: Request):
                 )
             },
         }
+        # A slice's children are not board rows: each parent row opens into them,
+        # so they ride the parent's row, with their statuses as a summary. The
+        # children of every parent the list's own filters (abandoned, archived)
+        # let through, not only the page's rows, of their current generation (as
+        # `store.children_of` picks them); their cost is one more query.
+        kids = c.execute(
+            "SELECT k.* FROM work_items k JOIN work_items p ON p.id = k.parent_id "
+            "WHERE (? OR p.status != ?) AND (p.archived_at IS NOT NULL) = ? "
+            "AND (p.group_state IS NULL "
+            "OR k.slice_generation = json_extract(p.group_state, '$.generation')) "
+            "ORDER BY k.parent_id, k.slice_generation, k.slice_key",
+            (include_abandoned, WorkItemStatus.ABANDONED, archived),
+        ).fetchall()
+        doors["children"] = [dict(k) for k in kids]
+        doors["child_views"] = _child_views(c, doors["children"])
         return (
             rows,
             cursor,
@@ -479,6 +510,11 @@ async def list_work_items(request: Request):
     mr_event_by_item = {e["work_item_id"]: json.loads(e["payload"]) for e in mr_event_rows}
     root_mr_by_item = {r["work_item_id"]: r["mr_ref"] for r in root_rows}
     task_by_item = {t["work_item_id"]: t["hook_point"] for t in task_rows}  # latest wins
+    kids_by_parent: dict[str, list] = {}
+    views_by_parent: dict[str, list] = {}
+    for kid, view in zip(doors["children"], doors["child_views"], strict=True):
+        kids_by_parent.setdefault(kid["parent_id"], []).append(kid)
+        views_by_parent.setdefault(kid["parent_id"], []).append(view)
 
     def _list_escalated(wid: str) -> bool:
         boundary, last = boundary_by_item.get(wid), escalation_by_item.get(wid)
@@ -517,12 +553,31 @@ async def list_work_items(request: Request):
             root_mr_by_item.get(r["id"]),
             mr_event_by_item.get(r["id"]),
         )
+        summary = slices_summary(r, kids_by_parent.get(r["id"], []))
+        shown = display_status(
+            r,
+            _stop_kind(
+                r["stop_kind"],
+                r["status"],
+                pending.get(r["id"]),
+                _boundary_payload(boundary_by_item.get(r["id"]), r["status"]),
+            ),
+            _list_escalated(r["id"]),
+            pending.get(r["id"]),
+            summary,
+        )
         return {
             "id": r["id"],
             "title": r["title"],
             "description": r["description"],
             "repo": r["repo"],
             "status": r["status"],
+            # As the detail has them: a parent's children of its current
+            # generation, None for any other item. A list row is never a child.
+            "children": views_by_parent.get(r["id"]) if summary else None,
+            "slices": summary,
+            "parent_id": r["parent_id"],
+            "slice_key": r["slice_key"],
             "chain_template": r["chain_template"],
             "one_off": store.one_off_view(r),
             # `store.chain_view`, not the raw column: a V1 row's
@@ -540,17 +595,7 @@ async def list_work_items(request: Request):
             "archived_by": r["archived_by"],
             "progress": _board_progress(st, r, folder, in_place),
             "fallback": _ran_on_fallback(latest, r["id"]),
-            "display_status": display_status(
-                r,
-                _stop_kind(
-                    r["stop_kind"],
-                    r["status"],
-                    pending.get(r["id"]),
-                    _boundary_payload(boundary_by_item.get(r["id"]), r["status"]),
-                ),
-                _list_escalated(r["id"]),
-                pending.get(r["id"]),
-            ),
+            "display_status": shown,
             "stop": _list_stop(r, pending.get(r["id"]), boundary_by_item.get(r["id"])),
             "step": _step_of(r, chains[r["id"]], task_by_item.get(r["id"]), with_task=True),
             "mr_ref": mr_ref,
@@ -569,6 +614,66 @@ async def list_work_items(request: Request):
     parsed = {r["id"]: store.materialized_chain_of(r) for r in rows}
     chains = {r["id"]: store.chain_view(r, parsed[r["id"]]) for r in rows}
     return {"items": [_item(r) for r in rows], "cursor": cursor}
+
+
+#: Which `slices` count a child's stored status falls in.
+_SLICE_COUNT = {
+    WorkItemStatus.COMPLETED: "done",
+    WorkItemStatus.NEEDS_HUMAN: "needs_you",
+    WorkItemStatus.PAUSED: "paused",
+    WorkItemStatus.ACTIVE: "running",
+    WorkItemStatus.WAITING: "running",
+    WorkItemStatus.RATE_LIMITED: "running",
+    WorkItemStatus.QUEUED: "queued",
+    WorkItemStatus.BLOCKED: "queued",
+    WorkItemStatus.ABANDONED: "dropped",
+}
+
+
+def _child_views(c, children: list[dict]) -> list[dict]:
+    """Each child as its parent's list row and detail show it, with its cost:
+    `usage_rollup`'s total, summed for every child in one query."""
+    ids = [k["id"] for k in children]
+    if not ids:
+        return []
+    spent = dict(
+        c.execute(
+            "SELECT work_item_id, COALESCE(SUM(cost_usd), 0.0) FROM worker_sessions "
+            f"WHERE work_item_id IN ({','.join('?' * len(ids))}) GROUP BY work_item_id",
+            ids,
+        ).fetchall()
+    )
+    return [
+        {
+            "id": k["id"],
+            "title": k["title"],
+            "slice_key": k["slice_key"],
+            "status": k["status"],
+            "display_status": TRAITS[WorkItemStatus(k["status"])].display
+            or DisplayStatus.NEEDS_YOU,
+            "current_node_id": k["current_node_id"],
+            "cost_usd": spent.get(k["id"], 0.0),
+        }
+        for k in children
+    ]
+
+
+def slices_summary(row, children: list) -> dict | None:
+    """`{done, needs_you, paused, running, queued, dropped, total}` over the
+    children of the parent's current generation, or None for an item with no
+    children. The generation is the parent's own group state."""
+    if not children:
+        return None
+    state = store.GroupState.from_json(row["group_state"]) if row["group_state"] else None
+    generation = state.generation if state is not None else None
+    counts = dict.fromkeys(("done", "needs_you", "paused", "running", "queued", "dropped"), 0)
+    total = 0
+    for kid in children:
+        if generation is not None and kid["slice_generation"] != generation:
+            continue
+        total += 1
+        counts[_SLICE_COUNT.get(WorkItemStatus(kid["status"]), "running")] += 1
+    return {**counts, "total": total} if total else None
 
 
 def _queued(row, event: dict | None, **more) -> dict | None:
@@ -1359,9 +1464,16 @@ async def get_work_item(wid: str, request: Request):
         must_fix_open=pending is not None
         and bool(st.db.read(lambda c: store.open_must_fix(c, wid))),
     )
+    children = st.db.read(lambda c: store.children_of(c, wid))
+    slices = slices_summary(row, children)
     return {
         # The override columns decoded, as every action and gate echo has them.
         **payload,
+        # A parent lists the children of its current generation; a child names its parent.
+        "children": st.db.read(lambda c: _child_views(c, children)) if children else None,
+        "slices": slices,
+        "parent_id": row["parent_id"],
+        "slice_key": row["slice_key"],
         "chain_definition": chain,
         # The Config tab's "effective chain" (UI v2 · 04 point 3): node
         # overrides folded over the template-shaped chain, plus the raw
@@ -1494,6 +1606,7 @@ async def get_work_item(wid: str, request: Request):
             _stop_kind(row["stop_kind"], row["status"], pending, stop_payload),
             escalated,
             pending,
+            slices,
         ),
         "stop": _stop(st, row, sessions, pending, stop_payload),
         "test_result": _test_result(st, row),
