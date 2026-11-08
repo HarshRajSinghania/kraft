@@ -11,6 +11,7 @@ import { mutating } from "./core/guard";
 import type { PickVerb } from "./core/picks";
 import { rowCommand } from "./core/primary";
 import { RESTRICTED } from "./core/readOnly";
+import { remoteStart, remoteWorktree } from "./core/remote";
 import { ALREADY_STARTING, alreadyRunning, INSTALL_URL, oneAtATime, startButtons, startFailure, startInvocation, type StartError } from "./core/start";
 import type { WorkspaceScope } from "./core/repoScope";
 import type { Store } from "./core/store";
@@ -52,6 +53,8 @@ export class Board implements vscode.TreeDataProvider<Node> {
     /** Whether "Connect this repo" applies: a folder's repo is not connected, on a loopback daemon. */
     private unconnected: () => boolean = () => false,
     private listArchived: () => Promise<WorkItem[]> = async () => [],
+    /** Whether the server ended this window's session: the down row then signs in again. */
+    private signedOut: () => boolean = () => false,
   ) {
     // Coalesced: a reconnect preloads every gate item, one answer at a time.
     drafts?.onChange(() => {
@@ -59,6 +62,8 @@ export class Board implements vscode.TreeDataProvider<Node> {
       this.draftsTimer = setTimeout(() => this.changed.fire(), 100);
     });
     store.onChange(() => this.changed.fire());
+    // The down row's wording follows the error.
+    store.onError(() => this.changed.fire());
     store.onConnection((up) => {
       this.changed.fire();
       if (up) void this.loadArchived();
@@ -147,7 +152,7 @@ export class Board implements vscode.TreeDataProvider<Node> {
 
   getTreeItem(node: Node): vscode.TreeItem {
     if (node.kind === "down") {
-      const { label, command, args } = downRow(this.store.lastError);
+      const { label, command, args } = downRow(this.store.lastError, this.signedOut());
       const t = new vscode.TreeItem(label);
       t.iconPath = new vscode.ThemeIcon("debug-disconnect");
       t.command = { command, title: label, arguments: args };
@@ -230,8 +235,15 @@ export function registerBoard(
   scope: Pick<WorkspaceScope, "onChange" | "ready" | "showAll">,
   drafts?: Drafts,
   unconnected?: () => boolean,
+  signedOut?: () => boolean,
 ) {
-  const board = new Board(store, include, scope, drafts, unconnected, async () => (await api.listArchived()).items);
+  // Signed in to another machine's Kraft the board shows every repo: say so, and offer no "show all" welcome.
+  const shown: Pick<WorkspaceScope, "onChange" | "ready" | "showAll"> = {
+    onChange: (cb) => scope.onChange(cb),
+    get ready() { return scope.ready; },
+    get showAll() { return scope.showAll || api.remote; },
+  };
+  const board = new Board(store, include, shown, drafts, unconnected, async () => (await api.listArchived()).items, signedOut);
   const view = vscode.window.createTreeView("kraft.board", { treeDataProvider: board, canSelectMany: true });
   // Every expand reads it again: the cache may be as old as the last connect.
   context.subscriptions.push(board, view.onDidExpandElement((e) => {
@@ -240,7 +252,7 @@ export function registerBoard(
   const updateBadge = () => (view.badge = board.badge());
   // The description says which repos; a stale board also says so above its rows, where a single-view sidebar shows no description.
   const updateDescription = () => {
-    const text = boardDescription(store.connected, scope.showAll, board.rows());
+    const text = boardDescription(store.connected, shown.showAll, board.rows());
     view.description = text;
     view.message = store.connected ? undefined : text;
   };
@@ -300,6 +312,7 @@ export function registerBoard(
     vscode.commands.registerCommand("kraft.answer", mutating("kraft.answer", refusal, warn, act("resume", "answer"))),
     // The detail, refreshed now: the row's worktree_exists may predate a reclaim.
     vscode.commands.registerCommand("kraft.openWorktree", async (node?: { item?: WorkItem }) => {
+      if (api.remote) return void vscode.window.showInformationMessage(remoteWorktree(api.base));
       const id = (await itemOr(node, "openWorktree"))?.id;
       if (!id) return;
       try {
@@ -318,7 +331,7 @@ export function registerBoard(
     // Only Restricted Mode refuses: a version mismatch must not stop starting Kraft.
     // From home, so the workspace's venv or shims cannot pick the `kraft` binary; detached,
     // so it needs no terminal. One start at a time: a second click says so.
-    vscode.commands.registerCommand("kraft.startDaemon", mutating("kraft.startDaemon", () => (refusal() === RESTRICTED ? RESTRICTED : null), warn, () => {
+    vscode.commands.registerCommand("kraft.startDaemon", mutating("kraft.startDaemon", () => (refusal() === RESTRICTED ? RESTRICTED : api.remote ? remoteStart(api.base) : null), warn, () => {
       // kraft.path is machine-scoped, so a workspace cannot choose the binary this runs.
       const { file, args } = startInvocation(vscode.workspace.getConfiguration("kraft").get<string>("path"), homedir());
       return startOnce(() => vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Starting Kraft…" }, () => startKraft(file, args, store)));
