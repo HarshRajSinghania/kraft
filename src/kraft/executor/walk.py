@@ -8,8 +8,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from kraft import builtins as _builtins
+from kraft import ci_reruns, events, inplace, item_paths, node_runs, reviewed_head, store
 from kraft import config as _config
-from kraft import events, inplace, item_paths, node_runs, reviewed_head, store
 from kraft import findings as _findings
 from kraft import policy as _policy
 from kraft.adapters import beads
@@ -67,6 +67,7 @@ from kraft.vocab import (
     StopKind,
     WorkItemEvent,
 )
+from kraft.worker import callback as _callback
 
 
 def chain_of(row) -> MaterializedChain:
@@ -2425,7 +2426,8 @@ async def _walk_node_once(
             )
             if verdict == "stop_needs_human":
                 return _Stuck(
-                    f"judge: {reasoning}",
+                    f"judge: {reasoning}"
+                    + prompts.ci_rerun_stop_note(dispatch.node_reruns(db, work_item_id, node)),
                     kind=StopKind.STUCK,
                     escalatable=not _red_pipeline_only(failed),
                 )
@@ -2454,6 +2456,7 @@ async def _walk_node_once(
         )
         if _policy.check(count=count, started_at=started_at, cap=cap, now=_now()) == "breached":
             reason = f"{key} exhausted after {count - 1} fix cycle(s)"
+            reason += prompts.ci_rerun_stop_note(dispatch.node_reruns(db, work_item_id, node))
             # What raised, measuring or fixing, is the only account of why when
             # a task never reported (Kraft-hr0xr) -- the loopless path already
             # says it, and the loop threw it away.
@@ -2479,7 +2482,13 @@ async def _walk_node_once(
                 ),
             )
 
-        if prints and fix_ran:
+        # A re-run's expected result is the same findings (a gh finding is only
+        # `job <name> failed: script_failure`), so a round that re-ran CI is not
+        # evidence of a stuck repair. The cap and the judge still bound it.
+        reran = bool(prints and fix_ran) and db.read(
+            lambda c: ci_reruns.reran_last_cycle(c, work_item_id, node.id)
+        )
+        if prints and fix_ran and not reran:
             # Whole-set equality catches "nothing at all changed". Kraft-0i6z4:
             # a single fingerprint recurring for `_FINGERPRINT_STREAK_LIMIT`
             # rounds is also stuck, even while a co-occurring finding keeps
@@ -2507,6 +2516,7 @@ async def _walk_node_once(
                     else f"stuck: finding {stuck_fp} unchanged across "
                     f"{_FINGERPRINT_STREAK_LIMIT} cycles"
                 )
+                reason += prompts.ci_rerun_stop_note(dispatch.node_reruns(db, work_item_id, node))
                 # Deliberately NOT mark_sessions_capped_out: these sessions did
                 # not cap out, and only a real cap breach may claim they did.
                 return _Stuck(
@@ -2553,6 +2563,12 @@ async def _walk_node_once(
             instruction += prompts.judge_note(reasoning)
         instruction += prompts.repair_doubts_fix_note(repair_doubted)
         instruction += prompts.FIX_NO_CHANGE_NOTE
+        if ci_reruns.waits_on_mr_ci(node):
+            try:
+                reachable = _callback.reachable(dispatch.item_sandbox(row, launch))
+            except dispatch.SandboxUnresolved:
+                reachable = False  # dispatch_node refuses the launch and names why
+            instruction += prompts.ci_rerun_fix_note(reachable)
         # Every round, not just the last one (Kraft-s7c04.7). `last_measurement`
         # gives the fixer one round of memory, which is why round N+2 reverted
         # the security property round N established on e983d85c -- the loop had
@@ -2678,7 +2694,11 @@ def _changed_nothing(
     if forge_mod.read_mr_meta(Path(worktree), work_item_id, run_dirs) != meta:
         return False
     moved = db.read(lambda c: events.read_after(c, seq, work_item_id))
-    return not any(e["type"] == GateEvent.THREAD_UPDATED for e in moved)
+    # A CI re-run changes what the next measurement reads without touching the
+    # checkout (Kraft-zje6v), like a thread reply.
+    return not any(
+        e["type"] in (GateEvent.THREAD_UPDATED, ForgeEvent.CI_RERUN_REQUESTED) for e in moved
+    )
 
 
 def _changed_nothing_reason(db, work_item_id: str, node: ResolvedNode, count: int, fix: str) -> str:
@@ -2693,6 +2713,7 @@ def _changed_nothing_reason(db, work_item_id: str, node: ResolvedNode, count: in
     return (
         f"stuck: fix attempt {count} in node {node.id} changed nothing, so measuring "
         f"again would see the same code. {said}"
+        + prompts.ci_rerun_stop_note(dispatch.node_reruns(db, work_item_id, node))
     )
 
 
