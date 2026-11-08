@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { KraftEvent, WorkerSession } from "../../types";
+import { tone } from "../graph/Minimap";
 import { accessibleName } from "../graph/types";
 import { chainGraph, rejectTarget } from "./graph";
 import { detail, FROZEN, SCOPE_PATH, scopeChain, SLICED, sliced, V1 } from "./testkit";
@@ -25,7 +26,7 @@ describe("chainGraph", () => {
       ["plan", "done", "6m"],
       ["plan_approval", "done", "you"],
       // The attempt in flight, not the node's first session.
-      ["verification", "current", "2/2 · 3m"],
+      ["verification", "current", "step 2 of 2 · 3m"],
       ["merge_request", "todo", null],
     ]);
     expect(nodes[2]).toMatchObject({ running: true, attempt: 2, kind: "exec" });
@@ -51,15 +52,24 @@ describe("chainGraph", () => {
     ["paused", null, { state: "current", paused: true, sub: "paused" }, "verification, node, paused"],
     ["needs_you", { kind: "question", node: "verification" }, { state: "current", sub: "needs you", needs: true }, "verification, node, needs you"],
     ["needs_you", { kind: "stuck", node: "verification" }, { state: "current", sub: "needs you", needs: true }, "verification, node, needs you"],
-    ["waiting", { kind: "rate_limit", node: "verification" }, { state: "current", running: false, wait: "waiting · rate limit" }, "verification, node, waiting · rate limit"],
+    ["waiting", { kind: "rate_limit", node: "verification" }, { state: "current", running: false, wait: "waiting · rate limit", subTone: "muted" }, "verification, node, waiting · rate limit"],
     ["waiting", { kind: "wait", node: "verification" }, { state: "current", running: false, wait: "waiting on CI" }, "verification, node, waiting on CI"],
     ["waiting", { kind: "wait", node: "verification", reason: "waiting for gpu-box (full)" }, { state: "current", running: false, wait: "waiting for a machine" }, "verification, node, waiting for a machine"],
-    ["running", null, { state: "current", running: true }, "verification, node, running"],
+    // Blue (and its moving light) is running alone; escalated stays amber, as the board and the badge draw it.
+    ["running", null, { state: "current", running: true, subTone: "run" }, "verification, node, running"],
+    ["escalated", null, { state: "current", running: false, subTone: "amber", needs: true }, "verification, node, escalated"],
+    ["queued", null, { state: "current", running: false, subTone: "muted" }, "verification, node, queued"],
   ])("draws the current node of a %s item, and names it so", (display_status, stop, want, name) => {
     const item = detail({ display_status: display_status as never, stop: stop && ({ resume_at: null, reason: null, ...stop } as never) });
     const node = chainGraph(item, [], NOW).nodes[2];
     expect(node).toMatchObject(want);
     expect(accessibleName(node, "node")).toBe(name);
+  });
+
+  // The chain strip over the canvas: running breathes blue, escalated is amber with needs-you, waiting and paused are neither.
+  it.each([["running", "running", null], ["escalated", "amber", null], ["waiting", "current", { kind: "wait" }], ["paused", "current", null]])("draws a %s item's node in the chain strip as %s", (display_status, want, stop) => {
+    const item = detail({ display_status: display_status as never, stop: stop && ({ node: "verification", resume_at: null, reason: null, ...stop } as never) });
+    expect(tone(chainGraph(item, [], NOW).nodes[2])).toBe(want);
   });
 
   it("draws each node's glyph by its tasks' kind, from the frozen chain (WI-3): mixed kinds draw none", () => {

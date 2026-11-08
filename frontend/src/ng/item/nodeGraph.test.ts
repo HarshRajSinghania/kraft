@@ -139,7 +139,7 @@ describe("nodeGraph rounds", () => {
     // Selected as `<step>.<task>` under `fix_loop` (a bare `tasks:` list is the step `main`), drawn as the task.
     expect(g.loop!.tasks.map((t) => [t.id, t.label])).toEqual([["main.repair", "repair"], ["judge", "judge"]]);
     expect(g.rounds).toMatchObject({ selected: 2, latest: 2, total: 3 });
-    expect(g.rounds!.rows).toEqual([{ n: 1, tone: "bad", outcome: "sent to the fix loop" }, { n: 2, tone: "warn", outcome: "running" }].map((r) => expect.objectContaining(r)));
+    expect(g.rounds!.rows).toEqual([{ n: 1, tone: "bad", outcome: "sent to the fix loop" }, { n: 2, tone: "run", outcome: "running" }].map((r) => expect.objectContaining(r)));
   });
 
   it("draws an earlier round whole: its tasks, its repair, and a judge that skipped the first one", () => {
@@ -172,7 +172,7 @@ describe("nodeGraph rounds", () => {
 
   it("calls the newest round running while the node is the one the run stands on, and done once it has moved on", () => {
     const running = nodeGraph(looped(), node, NOW, []);
-    expect(running.rounds!.rows.map((r) => [r.n, r.tone, r.outcome])).toEqual([[1, "bad", "sent to the fix loop"], [2, "warn", "running"]]);
+    expect(running.rounds!.rows.map((r) => [r.n, r.tone, r.outcome])).toEqual([[1, "bad", "sent to the fix loop"], [2, "run", "running"]]);
     const moved = nodeGraph(looped({ current_node_id: "merge_request" }), node, NOW, []);
     expect(moved.rounds!.rows.map((r) => [r.n, r.tone, r.outcome])).toEqual([[1, "bad", "sent to the fix loop"], [2, "ok", "done"]]);
     // The arc is amber only while the loop runs on past its first round, and red when it stopped.
@@ -289,7 +289,7 @@ describe("a node the chain ran again", () => {
     expect(states(g)).toEqual(["lint:current", "typecheck:todo", "code_review:todo"]);
     // One round and nothing run of the loop: no arc yet.
     expect(g.loop).toBeUndefined();
-    expect(g.rounds).toMatchObject({ latest: 1, rows: [{ n: 1, tone: "warn" }] });
+    expect(g.rounds).toMatchObject({ latest: 1, rows: [{ n: 1, tone: "run" }] });
   });
 
   it("reads a pass that resumed at the round the one before left off at as its own, starting at that round", () => {
@@ -386,6 +386,10 @@ describe("sessionLook covers every session status", () => {
   });
   it.each(["conflict", "infra", "infra_stop", "merge_rejected"] as const)("draws %s as failed", (status) => {
     expect(sessionLook(s("verification.checks.lint", { status }), 0).state).toBe("failed");
+  });
+  // Kraft-30qg8.2: a waiting session runs nothing and needs no one, so it is neither running nor amber ("needs you").
+  it.each(["waiting", "rate_limited"] as const)("draws %s as a plain current box that says waiting", (status) => {
+    expect(sessionLook(s("verification.checks.lint", { status }), 0)).toEqual({ state: "current", meta: "waiting" });
   });
   it("does not throw on a status a newer server sends", () => {
     expect(() => sessionLook(s("verification.checks.lint", { status: "brand_new" as SessionStatus }), 0)).not.toThrow();

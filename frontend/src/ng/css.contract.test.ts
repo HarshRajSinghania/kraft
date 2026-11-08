@@ -119,6 +119,31 @@ describe("ng CSS", () => {
     expect([...css.matchAll(block)].some((m) => m[1].includes(sel) && /transition:\s*none/.test(m[1]))).toBe(true);
   });
 
+  // Running moves in three ways (a light on a border, a sheen on a tick, a breathing dot), all off by one switch.
+  it("stops every running animation under reduced motion, from base.css", () => {
+    const css = readFileSync(join(here, "theme/base.css"), "utf-8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const block = /@media \(prefers-reduced-motion: reduce\) {([^\n]*)}\s*(?:\n|$)/.exec(css)?.[1] ?? "";
+    for (const v of ["--run-trace", "--run-sheen", "--run-breathe"]) expect(block).toMatch(new RegExp(`${v}:\\s*none`));
+    expect(block).toMatch(/--run-edge:\s*100%/);
+  });
+
+  // The overview's glyphs are `.minimap-node` buttons placed with position: absolute; a running one must stay there.
+  it("leaves the overview's running glyph absolutely placed", () => {
+    const css = readFileSync(join(here, "graph/graph.css"), "utf-8").replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(css).not.toMatch(/(?:^|\n)\.map-glyph\.is-running\s*{[^}]*position:/);
+  });
+
+  // The one switch holds only while every running animation goes through its variable.
+  it("plays the running keyframes only through their --run-* variables", () => {
+    const bad: string[] = [];
+    for (const file of cssFiles(here)) {
+      const css = readFileSync(file, "utf-8").replace(/\/\*[\s\S]*?\*\//g, "");
+      for (const m of css.matchAll(/\banimation(?:-name)?:\s*([^;}]+)/g))
+        if (/(?<!--)\brun-(?:trace|sheen|breathe)\b/.test(m[1])) bad.push(`${relative(here, file)}: ${m[0].trim()}`);
+    }
+    expect(bad).toEqual([]);
+  });
+
   // R12b-07 (fixed by #502's header): a fixed 118px wrapped "Raise cap", "Review conflicts" and "Reopen MR" and clipped them.
   it("lets the item header's main button grow with its label, on one line", () => {
     const css = readFileSync(join(here, "item/item.css"), "utf-8").replace(/\/\*[\s\S]*?\*\//g, "");
