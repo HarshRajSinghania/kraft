@@ -538,22 +538,26 @@ def test_the_node_the_item_stands_on_says_what_it_is_doing(status, fields, mark,
     waits on nobody: never the accent, which is the cursor's alone."""
     item = _detail(_row(ID, status, current_node_id="plan", **fields))
     lines, _, _ = chain.chain_lines(item, [], (0, False, 0), 60, (NOW, 3), COLOUR)
-    assert (lines[2].plain.split()[0], str(lines[2].style)) == (mark, style)
+    row = next(line for line in lines if line.plain.split()[-1] == "plan")
+    assert (row.plain.split()[0], str(row.style)) == (mark, style)
 
 
 @pytest.mark.parametrize(
-    ("status", "task_breathes"), [("running", True), ("paused", False)], ids=["running", "paused"]
+    ("status", "width", "task_breathes"),
+    [("running", 80, True), ("paused", 80, False), ("running", 25, True)],
+    ids=["running", "paused", "narrow-pane-wraps-the-session-line"],
 )
-def test_a_running_mark_breathes_where_work_is_happening(status, task_breathes):
+def test_a_running_mark_breathes_where_work_is_happening(status, width, task_breathes):
     """The plan task being worked on breathes while its item runs; a running
-    session's mark breathes while it runs."""
+    session's mark breathes while it runs, on whichever line it wrapped to."""
     tasks = [{"n": 1, "title": "Draw it", "state": "current"}]
     item = _flow(_running(), progress={"tasks": tasks}) | {"display_status": status}
     tick = pulse.BREATH // 2
-    lines, _, _ = chain.chain_lines(item, [], (3, True, -1), 80, (NOW, tick), COLOUR)
+    lines, _, _ = chain.chain_lines(item, [], (3, True, -1), width, (NOW, tick), COLOUR)
 
     def mark(word: str) -> list[str]:
-        line = next(line for line in lines if word in line.plain)
+        at = next(k for k, line in enumerate(lines) if word in line.plain)
+        line = next(line for line in lines[at:] if "●" in line.plain)
         at = line.plain.index("●")
         return [str(s.style) for s in line.spans if (s.start, s.end) == (at, at + 1)]
 

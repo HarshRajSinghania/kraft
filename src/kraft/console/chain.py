@@ -240,14 +240,16 @@ def node_detail(item, events, k, state, at, clock, colour, width=80) -> tuple[li
 
     def add(text: str, style: str = "", mark: str = "") -> None:
         """`text` wrapped under its own start, not at the pane's edge; with
-        `mark`, its first `●` drawn in that style."""
+        `mark`, its first `●` drawn in that style, on whichever line it wrapped to."""
         start = len(out)
         for line in textwrap.wrap(
             text.strip() and INDENT + text, max(width, 20), subsequent_indent=INDENT + "  "
         ) or [INDENT]:
             out.append(Text(line, style=style))
-        if mark and (at := out[start].plain.find("●")) >= 0:
-            out[start].stylize(mark, at, at + 1)
+        for line in out[start:] if mark else ():
+            if (at := line.plain.find("●")) >= 0:
+                line.stylize(mark, at, at + 1)
+                break
 
     passes = (item.get("node_passes") or {}).get(node_id) or []
     add(_state_line(item, node_id, state, node.get("kind") == "gate"), "bold")
