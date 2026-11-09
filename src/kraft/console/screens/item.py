@@ -346,7 +346,7 @@ class Item(ChainTab, MenuActions, View):
             chain = self.query_one("#item-chain")
             # Inside the header's panel: its own width once laid out.
             width = chain.content_region.width or self.app.size.width - 4
-            line = chain_line(marks, width, lit=self._lit)
+            line = chain_line(marks, width, lit=self._lit, running=spins(self.item))
             self.query_one("#item-chain", Static).update(line)
 
     def _light(self) -> None:

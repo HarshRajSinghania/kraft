@@ -17,6 +17,7 @@ from support.console_chain import (
 )
 from textual.widgets import RichLog
 
+from kraft.console import pulse
 from kraft.console.screens import item as item_view
 
 LATER = {"updated_at": "2026-10-16T00:00:00+00:00"}
@@ -223,9 +224,30 @@ def test_a_running_session_in_an_open_node_ticks(board, monkeypatch):
         return before, [line for line in _words(app) if "reviewer" in line]
 
     assert console.run(scenario) == (
-        ["▸ author · attempt 1 · * running · 5m 0s"],
+        ["▸ author · attempt 1 · ● running · 5m 0s"],
         ["reviewer · attempt 1 · done · 1m · $0.500"],
     )
+
+
+def test_a_running_items_node_spins_with_no_node_open(board, monkeypatch):
+    """The clock redraws the tab while the item runs, not only while an open
+    node has a running session: the node it stands on spins."""
+    detail = _detail(_row(ID, "running", current_node_id="plan"))
+    _serve(monkeypatch, detail, calls=[])
+    _serve_events(monkeypatch, [])
+    console = board([detail])
+
+    async def scenario(app, pilot):
+        await _chain_tab(console, app, pilot)
+
+        def mark() -> str:
+            return next(line for line in _words(app) if line.endswith("plan")).split()[-2]
+
+        first = mark()
+        await console.until(pilot, lambda: mark() != first, timeout=5)
+        return first in pulse.FRAMES and mark() in pulse.FRAMES
+
+    assert console.run(scenario) is True
 
 
 def test_a_hidden_chain_pane_is_not_drawn_into_by_a_live_read(board, monkeypatch):
