@@ -557,7 +557,8 @@ def test_a_running_mark_breathes_where_work_is_happening(status, width, task_bre
 
     def mark(word: str) -> list[str]:
         at = next(k for k, line in enumerate(lines) if word in line.plain)
-        line = next(line for line in lines[at:] if "●" in line.plain)
+        # Its own lines only: a narrow pane wraps a session line once.
+        line = next(line for line in lines[at : at + 2] if "●" in line.plain)
         at = line.plain.index("●")
         return [str(s.style) for s in line.spans if (s.start, s.end) == (at, at + 1)]
 
