@@ -1,6 +1,6 @@
-"""Life where work runs: Claude Code's spinner beside running work, a small
-running mark that breathes, how long its session has run, and the one clock
-that moves them all.
+"""Life where work runs: a spinner beside running work, a small running mark
+that breathes, how long its session has run, and the one clock that moves
+them all.
 
 Motion is only ever for work that is happening: an item whose agent is at work,
 or a session that runs. Nothing else moves, and nothing is staged. An escalated
